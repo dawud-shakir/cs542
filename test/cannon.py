@@ -1,31 +1,4 @@
-# For testing only
-import time # perf_counter
-import sys  # exit
-from tqdm import tqdm # tqdm is not compatible with njit because njit compiles to machine code
-
-def print_matrix(name, rows, cols, elements):
-    print(f"{name}:")
-    for i in range(rows):
-        for j in range(cols):
-            print(f"{elements[i*cols+j]:.1f} ", end="")
-        print()
-
-# True: error
-def check_matmat(n, A, B, C):
-    A2 = np.reshape(A,(n,n))
-    B2 = np.reshape(B,(n,n))
-    return not np.allclose(C, (A2 @ B2).flatten())
-
-def time_it(fn, *args, repeat=5, warmups=0):
-    # optional warmups (for steady-state CPU caches etc.)
-    for _ in range(warmups):
-        fn(*args)
-    times = []
-    for _ in range(repeat):
-        t0 = time.perf_counter()
-        fn(*args)
-        times.append(time.perf_counter() - t0)
-    return min(times), sum(times)/len(times)
+from my_package import print_matrix, time_it, check_matmat
 
 ####################################################################################
 
@@ -119,8 +92,7 @@ def matmat_cannon(A, B, C, n, sq_num_procs, rank_row, rank_col):
     tag_a = 1234
     tag_b = 4321
 
-    if rank == 0:
-        print(f"num_procs: {num_procs}, sq_num_procs: {sq_num_procs}, n: {n}, n*n (size): {size}")
+
 
     for i in range(size):
         C[i] = 0
@@ -150,6 +122,14 @@ def matmat_cannon(A, B, C, n, sq_num_procs, rank_row, rank_col):
     # Determine Send and Recv Processes for Inital Shift
 
     # Shift A[i][j] left by rank row: A[i][j-i]
+
+    ############### Test whether mod (-k) works as expected ###############
+    # x = -3 % 4
+    # print(f"Rank {rank} : -3 % 4 = {x}")
+    # mod = ((-3 % 4) + 4) % 4
+    # print(f"Rank {rank} : ((-3 % 4) + 4) % 4 = {mod}")
+    ######################################################################
+
     send_proc_A = get_proc(rank_row, (rank_col - rank_row) % sq_num_procs, sq_num_procs)
     recv_proc_A = get_proc(rank_row, (rank_col + rank_row) % sq_num_procs, sq_num_procs)
     
@@ -180,9 +160,6 @@ def matmat_cannon(A, B, C, n, sq_num_procs, rank_row, rank_col):
     # on submatrices received in initial shift
 
     matmat(n, recv_A, recv_B, C)
-
-    if rank == 0:
-        print(f"matmat 0 sumC: {sum(C)}")
 
     # 3. Determine new values for send_proc_A/B, recv_proc_A/B
     # Send A to [rank_row, rank_col+1]
@@ -225,14 +202,14 @@ def matmat_cannon(A, B, C, n, sq_num_procs, rank_row, rank_col):
 
         # 4e. Local matrix multiplication C += recv_A * recv_B
 
-        if rank == 0:
-            if np.all(C == 0):
-                print("Error: C is all zeros")
+        # if rank == 0:
+        #     if np.all(C == 0):
+        #         print("Error: C is all zeros")
 
         matmat(n, recv_A, recv_B, C)
 
-        if rank == 0:
-            print(f"matmat {i} sumC: {sum(C)}")
+        # if rank == 0:
+        #     print(f"matmat {i} sumC: {sum(C)}")
 
 
 
@@ -240,12 +217,12 @@ def matmat_cannon(A, B, C, n, sq_num_procs, rank_row, rank_col):
 
 Comm = MPI.COMM_WORLD
 rank = Comm.Get_rank()
-n_procs = Comm.Get_size()
+num_procs = Comm.Get_size()
 
 N = 1024
-sq_num_procs = int(np.sqrt(n_procs))
+sq_num_procs = int(np.sqrt(num_procs))
 
-if sq_num_procs*sq_num_procs != n_procs:
+if sq_num_procs*sq_num_procs != num_procs:
     if rank == 0:
         print("Number of processes needs to be square")
         Comm.Abort(-1)
@@ -255,12 +232,15 @@ rank_col = rank % sq_num_procs
 n = N // sq_num_procs
 size = n*n
 
-if n*n*n_procs != N*N:
+if n*n*num_procs != N*N:
     if rank == 0:
         print(f"Cannot evenly split {N} rows and cols over {size} processes")
         Comm.Abort(-1)
 
 
+
+if rank == 0:
+    print(f"num_procs: {num_procs}, sq_num_procs: {sq_num_procs}, n: {n}, n*n (size): {size}")
 
 # A = np.empty(size, dtype=np.float64)
 # B = np.empty(size, dtype=np.float64)
@@ -276,27 +256,38 @@ for i in range(n):
         B[i*n+j] = ((rank_row*n)+i)*N + (rank_col*n)+j+1
 
 
-start = MPI.Wtime()
-matmat_cannon(A, B, C, n, sq_num_procs, rank_row, rank_col)
-time = MPI.Wtime() - start
+# start = MPI.Wtime()
+# matmat_cannon(A, B, C, n, sq_num_procs, rank_row, rank_col)
+# time = MPI.Wtime() - start
+
+time, _ = time_it(matmat_cannon, A, B, C, n, sq_num_procs, rank_row, rank_col, repeat=5, warmups=2, timer_fn=MPI.Wtime)
 sum_C = np.sum(C)
-
-total_sum_C = np.zeros(1)
-Comm.Reduce(sum_C, total_sum_C, op=MPI.SUM, root=0)
-
-# max_time = np.zeros_like(time)
-# Comm.Reduce(time, max_time, op=MPI.MAX, root=0)
 
 A2 = np.resize(A, (n,n))
 B2 = np.resize(B, (n,n))
-sum_C2 = np.sum((A2 @ B2).flatten())
-total_sum_C2 = np.zeros(1)
-Comm.Reduce(sum_C2, total_sum_C2, op=MPI.SUM, root=0)
+time2, _ = time_it(np.matmul, A2, B2, repeat=5, warmups=2, timer_fn=MPI.Wtime)
+sum_C2 = np.sum(np.matmul(A2, B2).flatten())
+
+print(f"rank {rank} sumC: {sum_C}, sumC2: {sum_C2}")
+
+total_sum_C = np.zeros_like(sum_C)
+Comm.Reduce(sum_C, total_sum_C, op=MPI.SUM, root=0)
+max_time = np.zeros_like(time)
+Comm.Reduce(np.array([time]), max_time, op=MPI.MAX, root=0)
+
+# total_sum_C2 = np.zeros_like(sum_C2)
+# Comm.Reduce(sum_C2, total_sum_C2, op=MPI.SUM, root=0)
+# max_time2 = np.zeros_like(time2)
+# Comm.Reduce(np.array([time2]), max_time2, op=MPI.MAX, root=0)
+
+total_sum_C2 = np.array([sum_C2])
+Comm.Reduce(np.array([sum_C2]), total_sum_C2, op=MPI.SUM, root=0)
+max_time2 = np.zeros_like(time2)
+Comm.Reduce(np.array([time2]), max_time2, op=MPI.MAX, root=0)
+
 
 if rank == 0:
-    print(f"Cannon's Method : sumC {total_sum_C[0]:25f}")#, Elapsed Time {max_time:e}")
+    print(f"Cannon's Method : sumC {total_sum_C:25f} (Mine), Elapsed Time {max_time:e}")
+    print(f"Cannon's Method : sumC 295244544829852483584.000000 (C/C++), Elapsed Time 2.477775e-02")
+    print(f"Cannon's Method : sumC {total_sum_C2[0]:25f} (Python), Elapsed Time {max_time2:e}")
 
-    print(f"Cannon's Method : sumC {total_sum_C2[0]:25f} (Python)")
-    # Cannon's Method : sumC 295244544829999284224.00000000000000000000  
-    # sum_C (Python)  : sumC 286640016338190336.000000  
-    # Cannon's Method : sumC 295244544829852483584.000000
