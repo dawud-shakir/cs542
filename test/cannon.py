@@ -268,7 +268,6 @@ B2 = np.resize(B, (n,n))
 time2, _ = time_it(np.matmul, A2, B2, repeat=5, warmups=2, timer_fn=MPI.Wtime)
 sum_C2 = np.sum(np.matmul(A2, B2).flatten())
 
-print(f"rank {rank} sumC: {sum_C}, sumC2: {sum_C2}")
 
 total_sum_C = np.zeros_like(sum_C)
 Comm.Reduce(sum_C, total_sum_C, op=MPI.SUM, root=0)
@@ -285,6 +284,59 @@ Comm.Reduce(np.array([sum_C2]), total_sum_C2, op=MPI.SUM, root=0)
 max_time2 = np.zeros_like(time2)
 Comm.Reduce(np.array([time2]), max_time2, op=MPI.MAX, root=0)
 
+
+if rank == 0:
+    # Create full matrices from scratch on rank 0
+    A_full_gather = np.zeros((N, N))
+    B_full_gather = np.zeros((N, N))
+    
+    # Fill with the same pattern as the distributed matrices
+    for proc_row in range(sq_num_procs):
+        for proc_col in range(sq_num_procs):
+            # Fill this process's block
+            for i in range(n):
+                for j in range(n):
+                    global_i = proc_row*n + i
+                    global_j = proc_col*n + j
+                    A_full_gather[global_i, global_j] = (proc_row*n + i)*N + (proc_col*n) + j + 1
+                    B_full_gather[global_i, global_j] = (proc_row*n + i)*N + (proc_col*n) + j + 1
+    
+if rank == 0:
+
+    start = MPI.Wtime()
+    python_sum_from_scratch = np.sum(np.matmul(A_full_gather, B_full_gather))
+    end = MPI.Wtime()
+    python_time = end - start
+
+    print(f"python_sum_from_scratch {python_sum_from_scratch:20f}")
+
+
+# Each process has local A and B of shape (n*n)
+# Gather all local blocks to rank 0
+A_local = A.copy()
+B_local = B.copy()
+
+A_full_gather = None
+B_full_gather = None
+if rank == 0:
+    A_full_gather = np.zeros(N*N)
+    B_full_gather = np.zeros(N*N)
+
+Comm.Gather(A, A_full_gather, root=0)
+Comm.Gather(B, B_full_gather, root=0)
+
+if rank == 0:
+    # Reshape to (N, N)
+    A_full_gather = np.reshape(A_full_gather, (N, N))
+    B_full_gather = np.reshape(B_full_gather, (N, N))
+
+    start = MPI.Wtime()
+    python_sum_from_gather = np.sum(np.matmul(A_full_gather, B_full_gather))
+    end = MPI.Wtime()
+    python_time = end - start
+
+    print(f"python_sum_from_gather {python_sum_from_gather:20f}")
+ 
 
 if rank == 0:
     print(f"Cannon's Method : sumC {total_sum_C:25f} (Mine), Elapsed Time {max_time:e}")
