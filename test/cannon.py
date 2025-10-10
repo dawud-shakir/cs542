@@ -311,31 +311,34 @@ if rank == 0:
     print(f"python_sum_from_scratch {python_sum_from_scratch:20f}")
 
 
-# Each process has local A and B of shape (n*n)
-# Gather all local blocks to rank 0
-A_local = A.copy()
-B_local = B.copy()
 
-A_full_gather = None
-B_full_gather = None
-if rank == 0:
-    A_full_gather = np.zeros(N*N)
-    B_full_gather = np.zeros(N*N)
+# ############# The issue with yGather operation is that it doesn't reconstruct the
+# ############# full matrices A and B in the correct 2D layout.
+# # Each process has local A and B of shape (n*n)
+# # Gather all local blocks to rank 0
+# A_local = A.copy()
+# B_local = B.copy()
 
-Comm.Gather(A, A_full_gather, root=0)
-Comm.Gather(B, B_full_gather, root=0)
+# A_full_gather = None
+# B_full_gather = None
+# if rank == 0:
+#     A_full_gather = np.zeros(N*N)
+#     B_full_gather = np.zeros(N*N)
 
-if rank == 0:
-    # Reshape to (N, N)
-    A_full_gather = np.reshape(A_full_gather, (N, N))
-    B_full_gather = np.reshape(B_full_gather, (N, N))
+# Comm.Gather(A, A_full_gather, root=0)
+# Comm.Gather(B, B_full_gather, root=0)
 
-    start = MPI.Wtime()
-    python_sum_from_gather = np.sum(np.matmul(A_full_gather, B_full_gather))
-    end = MPI.Wtime()
-    python_time = end - start
+# if rank == 0:
+#     # Reshape to (N, N)
+#     A_full_gather = np.reshape(A_full_gather, (N, N))
+#     B_full_gather = np.reshape(B_full_gather, (N, N))
 
-    print(f"python_sum_from_gather {python_sum_from_gather:20f}")
+#     start = MPI.Wtime()
+#     python_sum_from_gather = np.sum(np.matmul(A_full_gather, B_full_gather))
+#     end = MPI.Wtime()
+#     python_time = end - start
+
+#     print(f"python_sum_from_gather {python_sum_from_gather:20f}")
  
 
 if rank == 0:
