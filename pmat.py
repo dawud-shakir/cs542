@@ -1,3 +1,4 @@
+from networkx import kosaraju_strongly_connected_components
 import numpy as np
 np.set_printoptions(precision=0, suppress=True, floatmode='fixed')
 
@@ -177,7 +178,10 @@ class pmat:
         C = np.zeros((self.n_loc, other.m_loc))
 
         # Total steps over self.m (or other.n) dimension
-        num_steps = np.ceil(self.m / self.m_loc).astype(int) # ceil for padding
+        # num_steps = np.ceil(self.m / self.m_loc).astype(int) # ceil for padding
+
+        num_steps = min(self.grid_comm.dims)
+
 
         # Deep copies for Sendrecv_replace
         A = self.local.copy()
@@ -191,21 +195,6 @@ class pmat:
         for _ in range(self.coords[1]):
             src, dst = self.grid_comm.Shift(0, -1)
             self.grid_comm.Sendrecv_replace(B, dest=dst, source=src)
-
-        # # Skew (initial alignment)
-        # i,j = self.coords
-
-        # # sending A to [i-j][j]
-        # # recving A from [i+j][j]
-
-        # src, dst = self.grid_comm.Get_cart_rank([i-j,j]), self.grid_comm.Get_cart_rank([i+j,j])
-        # self.grid_comm.Sendrecv_replace(A, dest=dst, source=src)
-
-        # # sending B to [i][j-i]
-        # # recving B from [i][j+i]
-
-        # src, dst = self.grid_comm.Get_cart_rank([i,j-i]), self.grid_comm.Get_cart_rank([i,j+i])
-        # self.grid_comm.Sendrecv_replace(B, dest=dst, source=src)
 
         for _ in range(num_steps):
             # Multiply and accumulate
@@ -223,14 +212,10 @@ class pmat:
     
 
     @property
-    def T(self):
-        # For a non-square matrix, we need a separate destination array.
-        
+    def T(self):        
         # 1. Each process computes the local transpose of its block:
         #                       A[i][j].T
-        # 2. Each process exchanges its local transpose with its transpose 
-        # partner:
-        #                   A[i][j].T <-> A[j][i].T 
+
 
         # Receiving type
         row_type = MPI.DOUBLE.Create_vector(self.n_loc, self.m_loc, self.m_loc)
@@ -245,9 +230,14 @@ class pmat:
         mult_col_type = col_type.Create_hvector(self.m_loc, 1, self.local.dtype.itemsize)
         mult_col_type.Commit()
 
-        # Transpose partner process in grid: A[i][j] <-> A[j][i]
+        # 2. Each process exchanges its local transpose with its transpose 
+        # partner:
+        #                   A[i][j].T <-> A[j][i].T 
+
+        # Transpose partner process in grid
         other = self.grid_comm.Get_cart_rank([self.coords[1], self.coords[0]])
 
+        # For a non-square matrix, we need a separate destination array.
         local_transpose = np.zeros((self.m_loc, self.n_loc))
         # local_transposed = np.ascontiguousarray(local_transposed)
 
@@ -272,8 +262,50 @@ dtype = np.double
 def maximum(scalar: dtype, M: pmat, *args, **kwargs):
     return pmat(M.n, M.m, M.grid_comm, np.maximum(scalar, M.local, *args, **kwargs))
 
-def mean(M: pmat, *args, **kwargs):
-    return pmat.from_numpy(np.mean(M.get_full(), *args, **kwargs), M.grid_comm)
+def pmax(M: pmat, *args, **kwargs):
+    axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+    assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+
+    if axis == 1:
+        horz_group = M.grid_comm.Sub([False, True])  # rows
+        row_max = []
+
+        for row in range(M.n_loc):
+            # Reduce to the root of each group
+            row_max.append(horz_group.reduce(np.max(M.local[row, :]), op=MPI.MAX, root=0))
+
+        if M.grid_comm.coords[1] == 0:
+            row_max = np.array([x for x in row_max if x is not np.nan]).flatten().reshape(-1, 1) # maxs is now a column vector
+        else:
+            row_max = None
+
+        return pmat(M.n, 1, M.grid_comm, row_max)
+
+def pmean(M: pmat, *args, **kwargs):
+    axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+    assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+
+    if axis == 1:
+        horz_group = M.grid_comm.Sub([False, True])  # rows
+        row_reduction = []
+
+        for row in range(M.n_loc):
+            # Reduce to the root of each group
+            row_reduction.append(horz_group.reduce(np.sum(M.local[row, :]), op=MPI.SUM, root=0))
+
+        if M.grid_comm.coords[1] == 0:
+            # Remove Nones and make a column vector
+            row_reduction = np.array([x for x in row_reduction if x is not np.nan]).flatten().reshape(-1, 1)
+            
+            # Divide by total number of columns
+            row_reduction = row_reduction / M.m
+        else:
+            # Process is not a root
+            row_reduction = None
+
+        return pmat(M.n, 1, M.grid_comm, row_reduction)
 
 # def _as_base_seq(seq):
 #     return [parallel_matrix_2._to_base(x) for x in seq]
@@ -296,6 +328,13 @@ def mean(M: pmat, *args, **kwargs):
 #     # mean over all axes can return a scalar; only wrap ndarrays
 #     return res if np.isscalar(res) else _wrap(res)
 
+def print_pmat_on_rank0(M: pmat, msg=""):
+    comm = M.grid_comm
+    rank = comm.Get_rank()
+
+    s = str(M)
+    if rank == 0:
+        print(f"{msg}:\n{s}\n")
 
 def test(n, k, m, dtype=np.double):
     
@@ -343,7 +382,6 @@ def test(n, k, m, dtype=np.double):
 
     # Negation
     check(-A, -A_mat, "-A")
-
     
     # Matrix Multiply
     B = pmat.from_numpy(B_mat, grid_comm)
@@ -364,6 +402,22 @@ def test(n, k, m, dtype=np.double):
     # Maximum
     check(maximum(32, A), np.maximum(32, A_mat), "maxmium(32, A)")
 
+    check(pmean(A, axis=1), np.mean(A_mat, axis=1, keepdims=True), "mean(A, axis=1)")
+
+    check(pmax(A, axis=1), np.max(A_mat, axis=1, keepdims=True), "mean(A, axis=1)")
+
+    ################################################################
+    # Vecmat and Matvec operation 
+    
+    # Row vector = n...1
+    row_vec = np.array(np.arange(n+1,1,-1), ndmin=2).reshape(1, -1)
+    row_pvec = pmat.from_numpy(row_vec, grid_comm)
+    check(row_pvec @ A, row_vec @ A_mat, "vecmat")
+
+    # Column vector = k...1
+    col_vec = np.array(np.arange(k+1,1,-1), ndmin=2).reshape(-1, 1) 
+    col_pvec = pmat.from_numpy(col_vec, grid_comm)
+    check(A @ col_pvec, A_mat @ col_vec, "matvec")
 
     ################################################################
     # End tests
@@ -375,11 +429,13 @@ def test(n, k, m, dtype=np.double):
 if __name__ == "__main__":
     # Test input
 
+    # Non-square matrices
+    test(n=9, k=5, m=16)
+
     # Square matrices
     test(n=8, k=8, m=16)
 
-    # Non-square matrices
-    test(n=9, k=5, m=16)
+
 
 
 
