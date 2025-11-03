@@ -154,23 +154,32 @@ class pmat:
         return M
 
     def __repr__(self):
-        return f"Parallel_Matrix({self.coords[0]}, {self.coords[1]})"
+        return f"pmat({self.n}x{self.m}) at coords {self.coords} with local shape {self.local.shape})"
     
     def __str__(self):
         return f"{self.get_full()}"
+    
+    def astype(self, dtype):
+        return pmat(self.n, self.m, self.grid_comm, self.local.astype(dtype))
+
+    def __gt__(self, other):
+        return pmat(self.n, self.m, self.grid_comm, self.local > other)
     
     def __add__(self, other):
         assert self.n == other.n and self.m == other.m, f'Add: A and B are not the same shape'
         
         return pmat(self.n, self.m, self.grid_comm, self.local + other.local)
     
+    def __sub__(self, other):        
+        return pmat(self.n, self.m, self.grid_comm, self.local - other.local)
+
     def __mul__(self, other):
         return pmat(self.n, self.m, self.grid_comm, self.local * other.local)
     
     def __neg__(self):
         return pmat(self.n, self.m, self.grid_comm, -self.local)
 
-    def __matmul__(self, other):
+    def __matmul__(self, other: 'pmat'):
         # Cannon's Algorithm
 
         assert self.m == other.n, f"A @ B: A.m  = {self.m} and B.n = {other.n}"
@@ -257,10 +266,102 @@ class pmat:
         
         # Transpose dimensions
         return pmat(self.m, self.n, self.grid_comm, local_transpose) 
+    
 
-dtype = np.double
-def maximum(scalar: dtype, M: pmat, *args, **kwargs):
-    return pmat(M.n, M.m, M.grid_comm, np.maximum(scalar, M.local, *args, **kwargs))
+   
+    # # Removes pylance warning 
+    # def __array__(self, dtype=None):
+    #     # how to convert to a bare numpy array
+    #     return np.asarray(self.local, dtype=dtype)
+
+    # Universal functions (np.exp, np.add, etc.)
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):        # method = "__call__" or "reduce", etc.
+
+        # Convert inputs to numpy arrays
+        arrays = [np.asarray(x.local) if isinstance(x, pmat) else x
+                  for x in inputs]
+
+        if ufunc is np.log and self.n_pad > 0 and self.coords[0]==self.grid_comm.dims[0]-1:
+            arrays = [np.asarray(x.local[:self.n_loc-self.n_pad, :self.m_loc]) if isinstance(x, pmat) else x
+                  for x in inputs]
+
+
+        
+        if ufunc is np.log and self.m_pad > 0 and self.coords[1]==self.grid_comm.dims[1]-1: 
+            arrays = [np.asarray(x.local[:self.n_loc, :self.m_loc-self.m_pad]) if isinstance(x, pmat) else x
+                  for x in inputs]
+
+
+        # # Replace zeros with nan to avoid -inf
+        # #### For log only
+        # if ufunc is np.log:
+        # arrays = [np.where(x == 0, np.nan, x) if isinstance(x, np.ndarray) else x
+        #         for x in arrays]
+        
+        result = getattr(ufunc, method)(*arrays, **kwargs)
+
+        # Wrap back into your class if it returns an array
+        if isinstance(result, np.ndarray):
+            return pmat(self.n, self.m, self.grid_comm, result)
+        else:
+            # e.g. scalar results from reduction
+            return result
+
+
+    #     # ------------------------------------------------------
+    # # Handle non-ufunc NumPy functions (np.mean, np.concatenate, etc.)
+    # # ------------------------------------------------------
+    def __array_function__(self, func, types, args, kwargs):
+        """
+        Called for non-ufunc NumPy functions that support the array function protocol.
+        """
+        # Only handle functions that explicitly support MyArray
+        # if func is np.concatenate:
+        #     arrays = [self.local if isinstance(a, pmat) else a for a in args[0]]
+        #     return pmat(np.concatenate(arrays, **kwargs))
+        # elif func is np.mean:
+        #     a = args[0]
+        #     if isinstance(a, pmat):
+        #         a = self.local
+        #     return pmat(np.mean(a, **kwargs))
+
+        if func is np.ones_like:
+            other = args[0]
+            if isinstance(other, pmat):
+                return pmat.from_numpy(np.ones((other.n, other.m)), other.grid_comm)
+        elif func is np.max:
+            other = args[0]
+            if isinstance(other, pmat):
+                return pmax(other, **kwargs)
+        elif func is np.sum:
+            other = args[0]
+            if isinstance(other, pmat):
+                return psum(other, **kwargs)
+
+
+        # Unknown function — defer to NumPy’s default
+        return NotImplemented
+    
+
+def psum(M: pmat, *args, **kwargs):
+    axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+    assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+
+    if axis == 1:
+        horz_group = M.grid_comm.Sub([False, True])  # rows
+        row_sum = []
+
+        for row in range(M.n_loc):
+            # Reduce to the root of each group
+            row_sum.append(horz_group.reduce(np.sum(M.local[row, :]), op=MPI.SUM, root=0))
+
+        if M.grid_comm.coords[1] == 0:
+            row_sum = np.array([x for x in row_sum if x is not np.nan]).flatten().reshape(-1, 1) # maxs is now a column vector
+        else:
+            row_sum = None
+
+        return pmat(M.n, 1, M.grid_comm, row_sum)
 
 def pmax(M: pmat, *args, **kwargs):
     axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
@@ -306,27 +407,12 @@ def pmean(M: pmat, *args, **kwargs):
             row_reduction = None
 
         return pmat(M.n, 1, M.grid_comm, row_reduction)
+    
+dtype = np.double
+def maximum(scalar: dtype, M: pmat, *args, **kwargs):
+    return pmat(M.n, M.m, M.grid_comm, np.maximum(scalar, M.local, *args, **kwargs))
 
-# def _as_base_seq(seq):
-#     return [parallel_matrix_2._to_base(x) for x in seq]
 
-# def _hstack(tup, *args, **kwargs):
-#     res = np.hstack(_as_base_seq(tup), *args, **kwargs)
-#     return _wrap(res)
-
-# def _concatenate(tup, *args, **kwargs):
-#     res = np.concatenate(_as_base_seq(tup), *args, **kwargs)
-#     return _wrap(res)
-
-# def _stack(tup, *args, **kwargs):
-#     res = np.stack(_as_base_seq(tup), *args, **kwargs)
-#     return _wrap(res)
-
-# def _mean(a, *args, **kwargs):
-#     base = parallel_matrix_2._to_base(a)
-#     res = np.mean(base, *args, **kwargs)
-#     # mean over all axes can return a scalar; only wrap ndarrays
-#     return res if np.isscalar(res) else _wrap(res)
 
 def print_pmat_on_rank0(M: pmat, msg=""):
     comm = M.grid_comm
@@ -334,7 +420,8 @@ def print_pmat_on_rank0(M: pmat, msg=""):
 
     s = str(M)
     if rank == 0:
-        print(f"{msg}:\n{s}\n")
+        # msg = msg + ":" if len(msg) > 0 else msg
+        print(f"{msg}\n{s}\n")
 
 def test(n, k, m, dtype=np.double):
     
@@ -355,7 +442,11 @@ def test(n, k, m, dtype=np.double):
     def check(M1: pmat, M2: np.ndarray, str=""):
         M1_pmat = M1.get_full()
         if rank == 0:
+            assert isinstance(M1, pmat) and isinstance(M2, np.ndarray), f"{str} failed instance check\ntype(M1)={type(M1)} and type(M2)={type(M2)}"
+            
             assert np.allclose(M1_pmat, M2), f"{str} failed allclose\nM1:\n{M1_pmat}\nM2:\n{M2}"
+
+            # assert M1_pmat.dtype == M2.dtype, f"{str} failed type check\ndtype(M1)={M1_pmat.dtype} and dtype(M2)={M2.dtype}"
             
             print(f"\t{str}\t\t\t\t... passed allclose")
 
@@ -368,9 +459,20 @@ def test(n, k, m, dtype=np.double):
     
     A_mat = np.arange(1, n * k + 1).reshape(n, k).astype(dtype)
     B_mat = np.arange(1, k * m + 1).reshape(k, m).astype(dtype)
+    D_mat = np.arange(1, m * n + 1).reshape(m, n).astype(dtype)
 
     A = pmat.from_numpy(A_mat, grid_comm)
 
+    
+    check(np.ones_like(A), np.ones_like(A_mat), "ones_like")
+    check(np.maximum(32, A), np.maximum(32, A_mat), "maximum(32, A)")
+
+    ###### Too large values cause exp to overflow/go to inf (normally, -1 to 1 range)
+    #######################check(np.exp(A), np.exp(A_mat), "exp(A)")
+    #######################check(np.exp(A).astype(float), np.exp(A_mat).astype(float), "astype")
+    check(np.log(A), np.log(A_mat), "log(A)")
+
+    check(A > 5, A_mat > 5, "A > 5")
     ################################################################
     # Non-Element-wise operations
 
@@ -387,11 +489,17 @@ def test(n, k, m, dtype=np.double):
     B = pmat.from_numpy(B_mat, grid_comm)
     check(A @ B, A_mat @ B_mat, "A @ B")
 
+    D = pmat.from_numpy(D_mat, grid_comm)
+    check(A @ B @ D, A_mat @ B_mat @ D_mat, "A @ B @ D")
+
     ################################################################
     # Element-wise operations
 
     # Addition
     check(A + A, A_mat + A_mat, "A + A")
+
+    # Subtraction
+    check(A - A, A_mat - A_mat, "A - A")
 
     # Multiplication
     check(A * A, A_mat * A_mat, "A * A")
@@ -410,12 +518,12 @@ def test(n, k, m, dtype=np.double):
     # Vecmat and Matvec operation 
     
     # Row vector = n...1
-    row_vec = np.array(np.arange(n+1,1,-1), ndmin=2).reshape(1, -1)
+    row_vec = np.array(np.arange(n+1, 1, -1), ndmin=2).reshape(1, -1)
     row_pvec = pmat.from_numpy(row_vec, grid_comm)
     check(row_pvec @ A, row_vec @ A_mat, "vecmat")
 
     # Column vector = k...1
-    col_vec = np.array(np.arange(k+1,1,-1), ndmin=2).reshape(-1, 1) 
+    col_vec = np.array(np.arange(k+1, 1, -1), ndmin=2).reshape(-1, 1) 
     col_pvec = pmat.from_numpy(col_vec, grid_comm)
     check(A @ col_pvec, A_mat @ col_vec, "matvec")
 
@@ -426,14 +534,19 @@ def test(n, k, m, dtype=np.double):
     if rank == 0:
         print()
 
-if __name__ == "__main__":
-    # Test input
+# if __name__ == "__main__":
+#     # Test input
 
-    # Non-square matrices
-    test(n=9, k=5, m=16)
+        # Large matrices
+#     test(n=1000, k=2000, m=10000)
 
-    # Square matrices
-    test(n=8, k=8, m=16)
+#     test(n=28*28, k=64, m=64)
+
+#     # Non-square matrices
+#     # test(n=9, k=5, m=16)
+
+#     # Square matrices
+#     # test(n=8, k=8, m=16)
 
 
 
