@@ -200,10 +200,8 @@ class Parallel_Layer:
         a = W @ X
 
         # (out, batch)
-        if self.phi != log_softmax:
-            h = self.phi(a)
-        else:
-            h = self.phi(a.get_full())
+        h = self.phi(a)
+
 
         # if rank==0:
         #     print(f"h type={type(h)}")
@@ -216,11 +214,7 @@ class Parallel_Layer:
         self.X = X.get_full()  # (in+1, batch)
         self.W = W.get_full()  # (out, in+1)
         self.a = a.get_full()  # (out, batch)
-        
-        if self.phi != log_softmax:
-            self.h = h.get_full()
-        else:
-            self.h = h  # Already full matrix     
+        self.h = h.get_full()
         
         
         # self.h = h.get_full()  # (out, batch)
