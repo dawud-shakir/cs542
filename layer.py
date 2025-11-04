@@ -153,16 +153,46 @@ class Parallel_Layer:
         self.t = 0
 
     def _as_2d(self, X):
-        X = np.asarray(X)
+        #### Reshape not implemented in pmat yet
         if X.ndim == 1:
-            X = X.reshape(-1, 1)             # (in, 1)
+            return X.reshape(-1, 1)             # (in, 1)
+        
+        
+        
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        num_procs = comm.Get_size()
+
+        # Process grid and panel width
+        Pr = int(np.sqrt(num_procs))
+        Pc = int(np.sqrt(num_procs))
+
+        dims = [Pr, Pc]
+        periods = [True, True]
+        grid_comm = comm.Create_cart(dims, periods, reorder=True)
+
+        p_X = pmat.from_numpy(X, grid_comm).get_full()
+        
         # Enforce (in, batch); transpose only if it exactly matches (batch, in)
-        if X.shape[0] != self.in_features:
-            if X.ndim == 2 and X.shape[1] == self.in_features:
-                X = X.T
+        if p_X.shape[0] != self.in_features:
+            if p_X.ndim == 2 and p_X.shape[1] == self.in_features:
+                p_X = p_X.T
             else:
-                raise ValueError(f"Expected input with {self.in_features} rows, got {X.shape}")
+                raise ValueError(f"Expected input with {self.in_features} rows, got {p_X.shape}")
+        
+        X = pmat.from_numpy(p_X, grid_comm).get_full()
         return X
+
+        # X = np.asarray(X)
+        # if X.ndim == 1:
+        #     X = X.reshape(-1, 1)             # (in, 1)
+        # # Enforce (in, batch); transpose only if it exactly matches (batch, in)
+        # if X.shape[0] != self.in_features:
+        #     if X.ndim == 2 and X.shape[1] == self.in_features:
+        #         X = X.T
+        #     else:
+        #         raise ValueError(f"Expected input with {self.in_features} rows, got {X.shape}")
+        # return X
 
     def _with_bias(self, X_no_bias):
         # Input's first row is the bias row (1s)
@@ -188,54 +218,40 @@ class Parallel_Layer:
 
 
         # (in+1, batch)
-        X = pmat.from_numpy(self._with_bias(X_no_bias), grid_comm)  
+        p_X = pmat.from_numpy(self._with_bias(X_no_bias), grid_comm)  
         
         # (out, in+1)
-        W = pmat.from_numpy(self.W, grid_comm)
+        p_W = pmat.from_numpy(self.W, grid_comm)
 
         # if rank==0:
         #     print(f"X shape: {X.n},{X.m} , W shape: {W.n},{W.m} on rank {rank}")
 
         # (out, batch) 
-        a = W @ X
+        p_a = p_W @ p_X
 
         # (out, batch)
-        h = self.phi(a)
+        p_h = self.phi(p_a)
+
+        assert p_W.shape[1] == p_X.shape[0], (p_W.shape, p_X.shape)
 
 
-        # if rank==0:
-        #     print(f"h type={type(h)}")
+        
+        self.X = p_X.get_full()  # (in+1, batch)
+        self.W = p_W.get_full()  # (out, in+1)
+        self.a = p_a.get_full()  # (out, batch)
+        self.h = p_h.get_full()  # (out, batch)
+
 
         # Input's first row is the bias row
         # self.X = self._with_bias(X_no_bias)  # (in+1, batch)    
         # self.a = self.W @ self.X             # (out, batch)
         # self.h = self.phi(self.a)
-        
-        self.X = X.get_full()  # (in+1, batch)
-        self.W = W.get_full()  # (out, in+1)
-        self.a = a.get_full()  # (out, batch)
-        self.h = h.get_full()
-        
-        
-        # self.h = h.get_full()  # (out, batch)
 
-
-        # Safety check:
-        assert self.W.shape[1] == self.X.shape[0], (self.W.shape, self.X.shape)
+        # assert self.W.shape[1] == self.X.shape[0], (self.W.shape, self.X.shape)
 
         return self.h
 
     def backward(self, dL_dh_next):
-        """
-        Backprop through this layer.
-
-        Args:
-            dL_dh_next: incoming gradient ∂L/∂h from the next layer (shape: out, batch).
-                        For the final layer, this is ∂L/∂h of that layer.
-
-        Returns:
-            dL_dh_prev: gradient to pass to previous layer (shape: in_prev, batch).
-        """
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()
         num_procs = comm.Get_size()
@@ -270,6 +286,18 @@ class Parallel_Layer:
 
         return p_dL_dh_prev.get_full()
 
+        """
+        Backprop through this layer.
+
+        Args:
+            dL_dh_next: incoming gradient ∂L/∂h from the next layer (shape: out, batch).
+                        For the final layer, this is ∂L/∂h of that layer.
+
+        Returns:
+            dL_dh_prev: gradient to pass to previous layer (shape: in_prev, batch).
+        """
+
+
         # # Local gradient wrt pre-activation a
         # dL_da = dL_dh_next * self.phi_prime(self.a)          # (out, batch)
         # assert dL_da.shape == self.a.shape, (dL_da.shape, self.a.shape)
@@ -284,6 +312,10 @@ class Parallel_Layer:
 
         
     def update_weights(self, alpha=1e-3):
+        
+        
+        
+        
         """ Adam optimizer update """
         self.t += 1
         g = self.dL_dW

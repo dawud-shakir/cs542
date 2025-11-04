@@ -41,6 +41,7 @@ class pmat:
         self.n = n
         self.m = m
         self.shape = (n, m)
+        self.ndim = 2
         
         self.rank = grid_comm.Get_rank()
         self.coords = self.grid_comm.Get_coords(self.rank)
