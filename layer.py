@@ -293,11 +293,36 @@ class Parallel_Layer:
 
         ######################################################
         # Parallel code above p_W_no_bias = p_W[:, 1:] ...
-        W_no_bias = self.W.get_full()[:, 1:]
-        p_W_no_bias = pmat.from_numpy(W_no_bias, grid_comm)
+        
+        ######### Version 1        
+        # W_no_bias = self.W.get_full()[:, 1:]
+        # p_W_no_bias1 = pmat.from_numpy(W_no_bias, grid_comm)
+
+        # p_dL_dh_prev = p_W_no_bias1.T @ p_dL_da                     # (in_prev, batch)
+
+        ######### Version 2
+        p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
+
+        # if grid_comm.coords[1] == 0:
+        #     p_W_no_bias2.local[:,0] = 0
 
         p_dL_dh_prev = p_W_no_bias.T @ p_dL_da                     # (in_prev, batch)
 
+        # print(f"p_W_no_bias1.shape = {p_W_no_bias1.shape}")
+        # print(f"p_W_no_bias2.shape = {p_W_no_bias2.shape}")
+
+        # if np.allclose(p_dL_dh_prev.get_full(), p_dL_dh_prev2.get_full()):
+        #     print("p_dL_dh_prev and p_dL_dh_prev2 are the same")
+        # else:
+        #     print("!!!!!!! p_dL_dh_prev and p_dL_dh_prev2 are different !!!!!!!")
+
+
+        # print(f"W.T._local_shape = {self.W.T._local_shape}")
+
+        # print(f"p_W_no_bias.T._local_shape = {p_W_no_bias1.T._local_shape}")
+        # print(f"p_dL_da._local_shape = {p_dL_da._local_shape}")
+
+        # exit()
         #######################################################
 
         self.dL_dW = p_dL_dW.get_full()
