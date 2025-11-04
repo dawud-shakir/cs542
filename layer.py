@@ -236,17 +236,51 @@ class Parallel_Layer:
         Returns:
             dL_dh_prev: gradient to pass to previous layer (shape: in_prev, batch).
         """
-        # Local gradient wrt pre-activation a
-        dL_da = dL_dh_next * self.phi_prime(self.a)          # (out, batch)
-        assert dL_da.shape == self.a.shape, (dL_da.shape, self.a.shape)
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        num_procs = comm.Get_size()
 
-        # Weight (incl. bias) gradient; X must have a leading column of 1s
-        self.dL_dW = dL_da @ self.X.T                        # (out, in_prev+1)
+        # Process grid and panel width
+        Pr = int(np.sqrt(num_procs))
+        Pc = int(np.sqrt(num_procs))
 
-        # Pass gradient back (exclude bias weights)
-        W_no_bias = self.W[:, 1:]                            # (out, in_prev)
-        dL_dh_prev = W_no_bias.T @ dL_da                     # (in_prev, batch)
-        return dL_dh_prev
+        dims = [Pr, Pc]
+        periods = [True, True]
+        grid_comm = comm.Create_cart(dims, periods, reorder=True)
+
+        p_a = pmat.from_numpy(self.a, grid_comm)
+        p_X = pmat.from_numpy(self.X, grid_comm)
+        p_W = pmat.from_numpy(self.W, grid_comm)
+        p_dL_dh_next = pmat.from_numpy(dL_dh_next, grid_comm)
+
+
+        p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
+
+
+        assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
+
+        p_dL_dW = p_dL_da @ p_X.T
+
+        p_W_no_bias = p_W[:, 1:]                            # (out, in_prev)
+
+        p_dL_dh_prev = p_W_no_bias.T @ p_dL_da                     # (in_prev, batch)
+
+        self.dL_dW = p_dL_dW.get_full()
+
+
+        return p_dL_dh_prev.get_full()
+
+        # # Local gradient wrt pre-activation a
+        # dL_da = dL_dh_next * self.phi_prime(self.a)          # (out, batch)
+        # assert dL_da.shape == self.a.shape, (dL_da.shape, self.a.shape)
+
+        # # Weight (incl. bias) gradient; X must have a leading column of 1s
+        # self.dL_dW = dL_da @ self.X.T                        # (out, in_prev+1)
+
+        # # Pass gradient back (exclude bias weights)
+        # W_no_bias = self.W[:, 1:]                            # (out, in_prev)
+        # dL_dh_prev = W_no_bias.T @ dL_da                     # (in_prev, batch)
+        # return dL_dh_prev
 
         
     def update_weights(self, alpha=1e-3):
