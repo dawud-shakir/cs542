@@ -60,6 +60,7 @@ class pmat:
 
         self.n_loc = np.ceil(self.n / Pr).astype(int)
         self.m_loc = np.ceil(self.m / Pc).astype(int)
+        self._local_shape = (self.n_loc, self.m_loc)
 
         # Padding if n or m are not evenly divisible by Pr or Pc
         _, self.n_pad = divmod(self.n, Pr)
@@ -91,23 +92,16 @@ class pmat:
 
         if local is not None:
             self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
-            
-    # def _shape_like_local():
-    #     # Return the shape of the block without padding
-    #     grid_comm = 
-    #     if self.coords[0] == 
 
+    @staticmethod
+    def resize(top: int, bottom: int, left: int, right: int, M: 'pmat'):
+        grid_comm = create_grid_comm()
+        # new_M = pmat(bottom-top, right-left, grid_comm)   # start with all zeros
 
-    def print_members(self):
-        if self.rank == 0:
-            print(f"Pr = {Pr}, Pc = {Pc}")
-            print(f"n = {n}, m = {m}")
-            print(f"n_loc = {self.n_loc}, m_loc = {self.m_loc}")
-            print(f"Is local contiguous? C_CONTIGUOUS={self.local.flags['C_CONTIGUOUS']}")  
-        # True False
+        full = M.get_full()[top:bottom, left:right]
+        new_M = pmat.from_numpy(full, grid_comm)
 
-            print()
-    
+        return new_M
 
 
     def set_full(self, M):
