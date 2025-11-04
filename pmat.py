@@ -8,11 +8,11 @@ from mpi4py import MPI
 
 class pmat:
     @staticmethod
-    def from_numpy(M: np.ndarray, grid_comm: MPI.Cartcomm):
+    def from_numpy(M_numpy: np.ndarray, grid_comm: MPI.Cartcomm):
         rank = grid_comm.Get_rank()
         row, col = grid_comm.Get_coords(rank)
         
-        n, m = M.shape
+        n, m = M_numpy.shape
 
         n_loc = np.ceil(n / grid_comm.dims[0]).astype(int)
         m_loc = np.ceil(m / grid_comm.dims[1]).astype(int)
@@ -22,10 +22,10 @@ class pmat:
         col_start = col * m_loc
         col_end = min((col + 1) * m_loc, m)
 
-        block = M[row_start:row_end, col_start:col_end]
+        block = M_numpy[row_start:row_end, col_start:col_end]
         
         # Pad with zeros
-        local = np.zeros((n_loc, m_loc), dtype=M.dtype)
+        local = np.zeros((n_loc, m_loc), dtype=np.double)
         
         local[:block.shape[0], :block.shape[1]] = block
 
@@ -40,6 +40,7 @@ class pmat:
 
         self.n = n
         self.m = m
+        self.shape = (n, m)
         
         self.rank = grid_comm.Get_rank()
         self.coords = self.grid_comm.Get_coords(self.rank)
@@ -219,6 +220,33 @@ class pmat:
 
         return pmat(self.n, other.m, grid_comm=self.grid_comm, local=C)
     
+    def __len__(self):
+        return len(self.local)
+
+    def __getitem__(self, idx):
+        # val = self.data[idx]
+        # return MyArray(val) if isinstance(val, np.ndarray) else val
+
+        full = self.get_full()
+        val = full[idx]
+        return pmat.from_numpy(val, self.grid_comm) if isinstance(val, np.ndarray) else val
+
+    # def get_start_end(slc, dim_size):
+    #     if isinstance(slc, slice):
+    #         start = slc.start if slc.start is not None else 0
+    #         end = slc.stop if slc.stop is not None else dim_size
+    #         return start, end
+    #     elif isinstance(slc, int):
+    #         return slc, slc+1
+
+
+
+    # def __setitem__(self, idx, value):
+    #     if isinstance(idx, int):
+    #         # handle single integer index    
+            
+        # self.data[idx] = value
+
 
     @property
     def T(self):        
