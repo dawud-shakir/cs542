@@ -168,15 +168,53 @@ class pmat:
         return pmat(self.n, self.m, self.grid_comm, self.local > other)
     
     def __add__(self, other):
-        assert self.n == other.n and self.m == other.m, f'Add: A and B are not the same shape'
-        
-        return pmat(self.n, self.m, self.grid_comm, self.local + other.local)
+        if np.isscalar(other):
+            return pmat(self.n, self.m, self.grid_comm, self.local + other)
+        else:
+            return pmat(self.n, self.m, self.grid_comm, self.local + other.local)
     
     def __sub__(self, other):        
         return pmat(self.n, self.m, self.grid_comm, self.local - other.local)
 
     def __mul__(self, other):
-        return pmat(self.n, self.m, self.grid_comm, self.local * other.local)
+        if np.isscalar(other):
+            return pmat(self.n, self.m, self.grid_comm, self.local * other)
+        else:
+            return pmat(self.n, self.m, self.grid_comm, self.local * other.local)
+    
+    def __rmul__(self, other):
+        # Handle scalar * pmat (right multiplication)
+        if np.isscalar(other):
+            return pmat(self.n, self.m, self.grid_comm, other * self.local)
+        else:
+            return NotImplemented
+        
+    def __truediv__(self, other):
+        if np.isscalar(other):
+            return pmat(self.n, self.m, self.grid_comm, self.local / other)
+        else:
+            return pmat(self.n, self.m, self.grid_comm, self.local / other.local)
+    
+    def __rdiv__(self, other):
+        # Handle scalar / pmat (right division)
+        if np.isscalar(other):
+            return pmat(self.n, self.m, self.grid_comm, other / self.local)
+        else:
+            return NotImplemented
+    
+    def __rtruediv__(self, other):
+        # Handle scalar / pmat (right true division for Python 3)
+        if np.isscalar(other):
+            return pmat(self.n, self.m, self.grid_comm, other / self.local)
+        else:
+            return NotImplemented
+
+    def __radd__(self, other):
+        # Handle scalar + pmat (right addition)
+        if np.isscalar(other):
+            return pmat(self.n, self.m, self.grid_comm, other + self.local)
+        else:
+            return NotImplemented
     
     def __neg__(self):
         return pmat(self.n, self.m, self.grid_comm, -self.local)
