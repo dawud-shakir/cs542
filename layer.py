@@ -2,8 +2,9 @@
 layer.py
 """
 from math import log
+from venv import create
 from mpi4py import MPI
-from pmat import pmat
+from pmat import pmat, create_grid_comm
 
 
 import numpy as np
@@ -123,21 +124,54 @@ class Parallel_Layer:
     def __init__(self, input_size, output_size):
         
         self.in_features = input_size
+        
+        grid_comm = create_grid_comm()
+        self.W = pmat(n=output_size, m=input_size+1, grid_comm=grid_comm) # +1 for bias 
 
-        # Weights *excluding* bias column: Kaiming uniform (fan_in), good for ReLU
-        # W_no_bias = kaiming_uniform_like(output_size, input_size)
 
         # Weights: Uniform initialization (Xavier)
-        bound = np.sqrt(6.0 / (input_size + output_size))
-        W_no_bias = np.random.uniform(-bound, bound, size=(output_size, input_size))
-
-        # Weights Bias column: Uniform(-1/sqrt(fan_in), +1/sqrt(fan_in))
-        bias_bound = 1.0 / np.sqrt(input_size)
-        W_bias_col = np.random.uniform(-bias_bound, bias_bound, size=(output_size, 1))
-
-        # Stack [bias | weights]
-        self.W = np.hstack([W_bias_col, W_no_bias]) # (out, in+1)
+        weight_bound = np.sqrt(6.0 / (input_size + output_size))
         
+        # Bias column: Uniform(-1/sqrt(fan_in), +1/sqrt(fan_in))
+        bias_bound = 1.0 / np.sqrt(input_size)
+
+        # Only W[:,0] has bias column
+        if self.W.coords[1] == 0:
+            weight_local = np.random.uniform(-weight_bound, weight_bound, size=(self.W.n_loc, self.W.m_loc-1))
+            
+            bias_local = np.random.uniform(-bias_bound, bias_bound, size=(self.W.n_loc, 1))
+
+            local = np.hstack([bias_local, weight_local])
+
+        else:
+            local = np.random.uniform(-weight_bound, weight_bound, size=(self.W.n_loc, self.W.m_loc))
+
+
+        
+
+
+
+        # print(f"global shape = {self.W.shape}")
+
+        # print(f"local coord = {self.W.coords}")
+        # print(f"local shape = {self.W.local.shape}")
+        # print(f"local padding = {(self.W.n_pad, self.W.m_pad)}")
+
+        # Concatenate bias and weights horizontally
+        self.W._set_local(local) # (out, in+1)
+        # exit()
+
+        # # Weights: Uniform initialization (Xavier)
+        # weight_bound = np.sqrt(6.0 / (input_size + output_size))
+        # W_no_bias = np.random.uniform(-weight_bound, weight_bound, size=(output_size, input_size))
+
+        # # Weights Bias column: Uniform(-1/sqrt(fan_in), +1/sqrt(fan_in))
+        # bias_bound = 1.0 / np.sqrt(input_size)
+        # W_bias_col = np.random.uniform(-bias_bound, bias_bound, size=(output_size, 1))
+
+        # # Stack [bias | weights]
+        # self.W = np.hstack([W_bias_col, W_no_bias]) # (out, in+1)
+
         # Default is linear activation
         self.phi = linear
         self.phi_prime = linear_derivative
@@ -149,7 +183,11 @@ class Parallel_Layer:
         self.b1, self.b2 = betas
         self.epsilon = eps
         self.weight_decay = weight_decay
-        self.m, self.v = np.zeros_like(self.W), np.zeros_like(self.W)  # first/second moments
+        # self.m, self.v = np.zeros_like(self.W), np.zeros_like(self.W)  # first/second moments
+        ############################################################
+        self.m, self.v = np.zeros(self.W.shape), np.zeros(self.W.shape)
+
+        ############################################################
         self.t = 0
 
     def _as_2d(self, X):
@@ -159,17 +197,7 @@ class Parallel_Layer:
         
         
         
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        num_procs = comm.Get_size()
-
-        # Process grid and panel width
-        Pr = int(np.sqrt(num_procs))
-        Pc = int(np.sqrt(num_procs))
-
-        dims = [Pr, Pc]
-        periods = [True, True]
-        grid_comm = comm.Create_cart(dims, periods, reorder=True)
+        grid_comm = create_grid_comm()
 
         p_X = pmat.from_numpy(X, grid_comm).get_full()
         
@@ -204,40 +232,32 @@ class Parallel_Layer:
         # X_no_bias is activations from previous layer (no bias row)
         X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
 
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        num_procs = comm.Get_size()
+        ##############################################
 
-        # Process grid and panel width
-        Pr = int(np.sqrt(num_procs))
-        Pc = int(np.sqrt(num_procs))
-
-        dims = [Pr, Pc]
-        periods = [True, True]
-        grid_comm = comm.Create_cart(dims, periods, reorder=True)
+        grid_comm = create_grid_comm()
 
 
         # (in+1, batch)
         p_X = pmat.from_numpy(self._with_bias(X_no_bias), grid_comm)  
         
         # (out, in+1)
-        p_W = pmat.from_numpy(self.W, grid_comm)
+        # p_W = pmat.from_numpy(self.W, grid_comm)
 
         # if rank==0:
         #     print(f"X shape: {X.n},{X.m} , W shape: {W.n},{W.m} on rank {rank}")
 
         # (out, batch) 
-        p_a = p_W @ p_X
+        p_a = self.W @ p_X
 
         # (out, batch)
         p_h = self.phi(p_a)
 
-        assert p_W.shape[1] == p_X.shape[0], (p_W.shape, p_X.shape)
+        assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
 
 
         
         self.X = p_X.get_full()  # (in+1, batch)
-        self.W = p_W.get_full()  # (out, in+1)
+        # self.W = p_W.get_full()  # (out, in+1)
         self.a = p_a.get_full()  # (out, batch)
         self.h = p_h.get_full()  # (out, batch)
 
@@ -252,21 +272,11 @@ class Parallel_Layer:
         return self.h
 
     def backward(self, dL_dh_next):
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        num_procs = comm.Get_size()
-
-        # Process grid and panel width
-        Pr = int(np.sqrt(num_procs))
-        Pc = int(np.sqrt(num_procs))
-
-        dims = [Pr, Pc]
-        periods = [True, True]
-        grid_comm = comm.Create_cart(dims, periods, reorder=True)
+        grid_comm = create_grid_comm()
 
         p_a = pmat.from_numpy(self.a, grid_comm)
         p_X = pmat.from_numpy(self.X, grid_comm)
-        p_W = pmat.from_numpy(self.W, grid_comm)
+        # p_W = pmat.from_numpy(self.W, grid_comm)
         p_dL_dh_next = pmat.from_numpy(dL_dh_next, grid_comm)
 
 
@@ -277,9 +287,18 @@ class Parallel_Layer:
 
         p_dL_dW = p_dL_da @ p_X.T
 
-        p_W_no_bias = p_W[:, 1:]                            # (out, in_prev)
+        # p_W_no_bias = p_W[:, 1:]                            # (out, in_prev)
+
+        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da                     # (in_prev, batch)
+
+        ######################################################
+        # Parallel code above p_W_no_bias = p_W[:, 1:] ...
+        W_no_bias = self.W.get_full()[:, 1:]
+        p_W_no_bias = pmat.from_numpy(W_no_bias, grid_comm)
 
         p_dL_dh_prev = p_W_no_bias.T @ p_dL_da                     # (in_prev, batch)
+
+        #######################################################
 
         self.dL_dW = p_dL_dW.get_full()
 
@@ -312,27 +331,17 @@ class Parallel_Layer:
 
         
     def update_weights(self, alpha=1e-3):
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        num_procs = comm.Get_size()
-
-        # Process grid and panel width
-        Pr = int(np.sqrt(num_procs))
-        Pc = int(np.sqrt(num_procs))
-
-        dims = [Pr, Pc]
-        periods = [True, True]
-        grid_comm = comm.Create_cart(dims, periods, reorder=True)
+        grid_comm = create_grid_comm()
         
         
-        p_W = pmat.from_numpy(self.W, grid_comm)
+        # p_W = pmat.from_numpy(self.W, grid_comm)
         p_dL_dW = pmat.from_numpy(self.dL_dW, grid_comm)
 
         """ Adam optimizer update """
         self.t += 1
         p_g = p_dL_dW
         if self.weight_decay != 0:
-            p_g = p_g + self.weight_decay * p_W
+            p_g = p_g + self.weight_decay * self.W
 
         # m = np.zeros_like(self.W)
         # v = np.zeros_like(self.W)
@@ -350,11 +359,11 @@ class Parallel_Layer:
         p_m_hat = p_m / (1 - self.b1 ** self.t)
         p_v_hat = p_v / (1 - self.b2 ** self.t)
 
-        p_W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
+        self.W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
 
         self.m = p_m.get_full()
         self.v = p_v.get_full()
-        self.W = p_W.get_full()        
+        # self.W = p_W.get_full()        
         
         """ SGD update (comment the above to use) """
         # self.W -= alpha * self.dL_dW

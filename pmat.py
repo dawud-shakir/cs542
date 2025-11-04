@@ -4,7 +4,19 @@ np.set_printoptions(precision=0, suppress=True, floatmode='fixed')
 
 from mpi4py import MPI
 
+def create_grid_comm():
+    comm = MPI.COMM_WORLD
+    num_procs = comm.Get_size()
 
+    # Grid rows and columns
+    Pr = int(np.sqrt(num_procs))
+    Pc = int(np.sqrt(num_procs))
+
+    dims = [Pr, Pc]
+    periods = [True, True]
+    return comm.Create_cart(dims, periods, reorder=True)
+
+    
 
 class pmat:
     @staticmethod
@@ -52,20 +64,40 @@ class pmat:
         # Padding if n or m are not evenly divisible by Pr or Pc
         _, self.n_pad = divmod(self.n, Pr)
         _, self.m_pad = divmod(self.m, Pc)
+        self.is_padded = (self.n_pad > 0) or (self.m_pad > 0)
 
-        # self.print_members()
-        
+        # if self.is_padded:
+        #     #
+        #     # Adjust local shape if on the grid's right or bottom edge
+        #     #  
+            
+        #     if self.n_pad > 0 and self.coords[0] == grid_comm.dims[0] - 1:
+        #         self.n_loc -= self.n_pad
+            
+        #     if self.m_pad > 0 and self.coords[1] == grid_comm.dims[1] - 1:
+        #         self.m_loc -= self.m_pad
+            
+
+
+        self._set_local(local)
+
+    def _set_local(self, local):
+        # self.local will be (n_pad, m_pad) larger than local if there is zero padding.
         self.local = np.zeros((self.n_loc, self.m_loc), dtype=np.double)
-        self.local = np.ascontiguousarray(self.local)   # or self.local = self.local.copy(order='C')
+        self.local = np.ascontiguousarray(self.local)
+        
+        if local is not None:
+            self.local[:local.shape[0], :local.shape[1]] = local
 
         if local is not None:
             self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
             
-            
-            # print(f"local (passed) shape: {local.shape}")
-            # print(f"local (variable) shape: {self.local.shape}")
-            # print(f"After copy, local: {self.local}")
-        
+    # def _shape_like_local():
+    #     # Return the shape of the block without padding
+    #     grid_comm = 
+    #     if self.coords[0] == 
+
+
     def print_members(self):
         if self.rank == 0:
             print(f"Pr = {Pr}, Pc = {Pc}")
