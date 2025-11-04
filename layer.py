@@ -179,9 +179,9 @@ class Parallel_Layer:
                 p_X = p_X.T
             else:
                 raise ValueError(f"Expected input with {self.in_features} rows, got {p_X.shape}")
-        
-        X = pmat.from_numpy(p_X, grid_comm).get_full()
-        return X
+        return p_X
+        # X = pmat.from_numpy(p_X, grid_comm).get_full()
+        # return X
 
         # X = np.asarray(X)
         # if X.ndim == 1:
@@ -312,34 +312,81 @@ class Parallel_Layer:
 
         
     def update_weights(self, alpha=1e-3):
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        num_procs = comm.Get_size()
+
+        # Process grid and panel width
+        Pr = int(np.sqrt(num_procs))
+        Pc = int(np.sqrt(num_procs))
+
+        dims = [Pr, Pc]
+        periods = [True, True]
+        grid_comm = comm.Create_cart(dims, periods, reorder=True)
         
         
-        
-        
+        p_W = pmat.from_numpy(self.W, grid_comm)
+        p_dL_dW = pmat.from_numpy(self.dL_dW, grid_comm)
+
         """ Adam optimizer update """
         self.t += 1
-        g = self.dL_dW
+        p_g = p_dL_dW
         if self.weight_decay != 0:
-            g = g + self.weight_decay * self.W
+            p_g = p_g + self.weight_decay * p_W
 
         # m = np.zeros_like(self.W)
         # v = np.zeros_like(self.W)
 
-        m, v = self.m, self.v
+        # m, v = self.m, self.v
+        p_m = pmat.from_numpy(self.m, grid_comm)
+        p_v = pmat.from_numpy(self.v, grid_comm)
+
 
          # first/second moments (momentum/velocity)
-        m = self.b1 * m + (1 - self.b1) * g
-        v = self.b2 * v + (1 - self.b2) * (g * g)
+        p_m = self.b1 * p_m + (1 - self.b1) * p_g
+        p_v = self.b2 * p_v + (1 - self.b2) * (p_g * p_g)
 
         # bias correction
-        m_hat = m / (1 - self.b1 ** self.t)
-        v_hat = v / (1 - self.b2 ** self.t)
+        p_m_hat = p_m / (1 - self.b1 ** self.t)
+        p_v_hat = p_v / (1 - self.b2 ** self.t)
 
-        self.W -= alpha * m_hat / (np.sqrt(v_hat) + self.epsilon)
+        p_W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
 
-        self.m, self.v = m, v
+        self.m = p_m.get_full()
+        self.v = p_v.get_full()
+        self.W = p_W.get_full()        
         
         """ SGD update (comment the above to use) """
         # self.W -= alpha * self.dL_dW
 
         self.dL_dW = None # Do not allow the same gradient to be used again
+
+
+        # ### Original ##################################################
+        # """ Adam optimizer update """
+        # self.t += 1
+        # g = self.dL_dW
+        # if self.weight_decay != 0:
+        #     g = g + self.weight_decay * self.W
+
+        # # m = np.zeros_like(self.W)
+        # # v = np.zeros_like(self.W)
+
+        # m, v = self.m, self.v
+
+        #  # first/second moments (momentum/velocity)
+        # m = self.b1 * m + (1 - self.b1) * g
+        # v = self.b2 * v + (1 - self.b2) * (g * g)
+
+        # # bias correction
+        # m_hat = m / (1 - self.b1 ** self.t)
+        # v_hat = v / (1 - self.b2 ** self.t)
+
+        # self.W -= alpha * m_hat / (np.sqrt(v_hat) + self.epsilon)
+
+        # self.m, self.v = m, v
+        
+        # """ SGD update (comment the above to use) """
+        # # self.W -= alpha * self.dL_dW
+
+        # self.dL_dW = None # Do not allow the same gradient to be used again
