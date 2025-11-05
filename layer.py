@@ -28,60 +28,9 @@ def log_softmax(z):
     """
     max_z = np.max(z, axis=1, keepdims=True)  # For numerical stability
     exp_z = np.exp(z - max_z)
-    return z - np.log(np.sum(exp_z, axis=1, keepdims=True)) - max_z
+    log_z = z - np.log(np.sum(exp_z, axis=1, keepdims=True)) - max_z
 
-def log_softmax_derivative(x, axis=-1):
-    """
-    Compute derivative of log_softmax
-    Returns: (batch_size, num_classes, num_classes) jacobian
-    """
-    # First compute log_softmax
-    """log_sm = log_softmax(x, axis=axis)"""
-
-
-    max_z = np.max(x, axis=0, keepdims=True)  # For numerical stability
-    exp_z = np.exp(x - max_z)
-    log_sm = x - np.log(np.sum(exp_z, axis=1, keepdims=True)) - max_z
-    
-    # Convert back to softmax probabilities
-    softmax_probs = np.exp(log_sm)  # Shape: (batch_size, num_classes)
-    
-    batch_size, num_classes = softmax_probs.shape
-    
-    # Initialize jacobian
-    """jacobian = np.zeros((batch_size, num_classes, num_classes))"""
-    
-    jacobian = np.zeros((batch_size, num_classes))
-
-    for i in range(batch_size):
-        # For each sample, create the jacobian matrix
-        sm = softmax_probs[i]  # Shape: (num_classes,)
-        
-        # Create identity matrix
-        identity = np.eye(num_classes)
-        
-        # Subtract outer product: I - softmax ⊗ 1ᵀ
-        jacobian[i] = identity - np.outer(np.ones(num_classes), sm)
-    
-    return jacobian
-
-# Simpler version for backprop (when combined with NLL loss)
-def log_softmax_derivative_simple(log_softmax_output, true_labels):
-    """
-    When log_softmax is followed by NLL loss, the combined gradient is simpler
-    """
-    # Convert log probabilities back to probabilities
-    probs = np.exp(log_softmax_output)  # Shape: (batch_size, num_classes)
-    
-    # Create one-hot encoding of true labels
-    batch_size, num_classes = probs.shape
-    one_hot = np.zeros_like(probs)
-    one_hot[np.arange(batch_size), true_labels] = 1
-    
-    # Gradient of log_softmax + NLL loss
-    gradient = probs - one_hot  # Shape: (batch_size, num_classes)
-    
-    return gradient
+    return log_z
 
 def nll_loss(log_probs, true_labels):
     """
@@ -108,25 +57,14 @@ def nll_loss_derivative(log_probs, true_labels):
     # Combined gradient
     return probs - one_hot  # Shape: (batch_size, num_classes)
 
-
-
-
-
-def kaiming_uniform_like(out_features, in_features):
-    # fan_in mode, ReLU gain = sqrt(2)
-    bound = np.sqrt(6.0 / in_features) / np.sqrt(0.5)  # = sqrt(6/fan_in) / (1/√2) = sqrt(12/fan_in)
-    # Simpler: use std = sqrt(2/fan_in); uniform bound = sqrt(3)*std
-    std = np.sqrt(2.0 / in_features)
-    bound = np.sqrt(3.0) * std                          # == sqrt(6/fan_in)
-    return np.random.uniform(-bound, bound, size=(out_features, in_features))
-
 class Parallel_Layer:
     def __init__(self, input_size, output_size):
         
         self.in_features = input_size
-        
-        grid_comm = create_grid_comm()
-        self.W = pmat(n=output_size, m=input_size+1, grid_comm=grid_comm) # +1 for bias 
+         
+        self.W = pmat(n=output_size, m=input_size+1) # +1 for bias 
+
+
 
 
         # Weights: Uniform initialization (Xavier)
@@ -194,13 +132,8 @@ class Parallel_Layer:
         #### Reshape not implemented in pmat yet
         if X.ndim == 1:
             return X.reshape(-1, 1)             # (in, 1)
-        
-        
-        
-        grid_comm = create_grid_comm()
 
-        p_X = pmat.from_numpy(X, grid_comm).get_full()
-        
+        p_X = pmat.from_numpy(X).get_full()
         # Enforce (in, batch); transpose only if it exactly matches (batch, in)
         if p_X.shape[0] != self.in_features:
             if p_X.ndim == 2 and p_X.shape[1] == self.in_features:
@@ -232,102 +165,34 @@ class Parallel_Layer:
         # X_no_bias is activations from previous layer (no bias row)
         X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
 
-        ##############################################
-
-        grid_comm = create_grid_comm()
-
-
         # (in+1, batch)
-        p_X = pmat.from_numpy(self._with_bias(X_no_bias), grid_comm)  
-        
-        # (out, in+1)
-        # p_W = pmat.from_numpy(self.W, grid_comm)
-
-        # if rank==0:
-        #     print(f"X shape: {X.n},{X.m} , W shape: {W.n},{W.m} on rank {rank}")
-
-        # (out, batch) 
-        p_a = self.W @ p_X
+        p_X = pmat.from_numpy(self._with_bias(X_no_bias))
 
         # (out, batch)
+        p_a = self.W @ p_X
         p_h = self.phi(p_a)
 
         assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
 
-
-        
         self.X = p_X.get_full()  # (in+1, batch)
-        # self.W = p_W.get_full()  # (out, in+1)
         self.a = p_a.get_full()  # (out, batch)
         self.h = p_h.get_full()  # (out, batch)
-
-
-        # Input's first row is the bias row
-        # self.X = self._with_bias(X_no_bias)  # (in+1, batch)    
-        # self.a = self.W @ self.X             # (out, batch)
-        # self.h = self.phi(self.a)
-
-        # assert self.W.shape[1] == self.X.shape[0], (self.W.shape, self.X.shape)
 
         return self.h
 
     def backward(self, dL_dh_next):
-        grid_comm = create_grid_comm()
-
-        p_a = pmat.from_numpy(self.a, grid_comm)
-        p_X = pmat.from_numpy(self.X, grid_comm)
-        # p_W = pmat.from_numpy(self.W, grid_comm)
-        p_dL_dh_next = pmat.from_numpy(dL_dh_next, grid_comm)
-
+        p_a = pmat.from_numpy(self.a)
+        p_X = pmat.from_numpy(self.X)
+        p_dL_dh_next = pmat.from_numpy(dL_dh_next)
 
         p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
-
-
         assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
-
         p_dL_dW = p_dL_da @ p_X.T
 
-        # p_W_no_bias = p_W[:, 1:]                            # (out, in_prev)
-
-        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da                     # (in_prev, batch)
-
-        ######################################################
-        # Parallel code above p_W_no_bias = p_W[:, 1:] ...
-        
-        ######### Version 1        
-        # W_no_bias = self.W.get_full()[:, 1:]
-        # p_W_no_bias1 = pmat.from_numpy(W_no_bias, grid_comm)
-
-        # p_dL_dh_prev = p_W_no_bias1.T @ p_dL_da                     # (in_prev, batch)
-
-        ######### Version 2
         p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
-
-        # if grid_comm.coords[1] == 0:
-        #     p_W_no_bias2.local[:,0] = 0
-
-        p_dL_dh_prev = p_W_no_bias.T @ p_dL_da                     # (in_prev, batch)
-
-        # print(f"p_W_no_bias1.shape = {p_W_no_bias1.shape}")
-        # print(f"p_W_no_bias2.shape = {p_W_no_bias2.shape}")
-
-        # if np.allclose(p_dL_dh_prev.get_full(), p_dL_dh_prev2.get_full()):
-        #     print("p_dL_dh_prev and p_dL_dh_prev2 are the same")
-        # else:
-        #     print("!!!!!!! p_dL_dh_prev and p_dL_dh_prev2 are different !!!!!!!")
-
-
-        # print(f"W.T._local_shape = {self.W.T._local_shape}")
-
-        # print(f"p_W_no_bias.T._local_shape = {p_W_no_bias1.T._local_shape}")
-        # print(f"p_dL_da._local_shape = {p_dL_da._local_shape}")
-
-        # exit()
-        #######################################################
+        p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
 
         self.dL_dW = p_dL_dW.get_full()
-
-
         return p_dL_dh_prev.get_full()
 
         """
@@ -356,11 +221,7 @@ class Parallel_Layer:
 
         
     def update_weights(self, alpha=1e-3):
-        grid_comm = create_grid_comm()
-        
-        
-        # p_W = pmat.from_numpy(self.W, grid_comm)
-        p_dL_dW = pmat.from_numpy(self.dL_dW, grid_comm)
+        p_dL_dW = pmat.from_numpy(self.dL_dW)
 
         """ Adam optimizer update """
         self.t += 1
@@ -368,15 +229,10 @@ class Parallel_Layer:
         if self.weight_decay != 0:
             p_g = p_g + self.weight_decay * self.W
 
-        # m = np.zeros_like(self.W)
-        # v = np.zeros_like(self.W)
+        p_m = pmat.from_numpy(self.m)
+        p_v = pmat.from_numpy(self.v)
 
-        # m, v = self.m, self.v
-        p_m = pmat.from_numpy(self.m, grid_comm)
-        p_v = pmat.from_numpy(self.v, grid_comm)
-
-
-         # first/second moments (momentum/velocity)
+        # first/second moments (momentum/velocity)
         p_m = self.b1 * p_m + (1 - self.b1) * p_g
         p_v = self.b2 * p_v + (1 - self.b2) * (p_g * p_g)
 
@@ -388,10 +244,6 @@ class Parallel_Layer:
 
         self.m = p_m.get_full()
         self.v = p_v.get_full()
-        # self.W = p_W.get_full()        
-        
-        """ SGD update (comment the above to use) """
-        # self.W -= alpha * self.dL_dW
 
         self.dL_dW = None # Do not allow the same gradient to be used again
 

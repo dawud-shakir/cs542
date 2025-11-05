@@ -4,6 +4,7 @@ main.py
 
 import numpy as np
 np.random.seed(0)  # Reproducibility
+from pmat import create_grid_comm
 import layer as nn
 
 import os               # for file paths
@@ -78,8 +79,8 @@ batch_size = 1000
 fc1 = nn.Parallel_Layer(input_size=28*28,  output_size=64); fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
 fc2 = nn.Parallel_Layer(input_size=64, output_size=64); fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
 fc3 = nn.Parallel_Layer(input_size=64, output_size=64); fc3.phi, fc3.phi_prime = nn.ReLU, nn.ReLU_derivative
-# fc4 = nn.Parallel_Layer(input_size=64, output_size=10); fc4.phi, fc4.phi_prime = nn.log_softmax, nn.log_softmax_derivative
-fc4 = nn.Parallel_Layer(input_size=64, output_size=10); fc4.phi, _ = nn.log_softmax, nn.log_softmax_derivative
+fc4 = nn.Parallel_Layer(input_size=64, output_size=10); fc4.phi= nn.log_softmax 
+
 """ Testing """
 
 def evaluate():
@@ -104,18 +105,18 @@ def main():
     losses, accuracies = [], []
 
     for epoch in range(n_epochs):
-    
 
-        
-        indicies = np.random.permutation(np.arange(X_train.shape[0]))  # Shuffle data
-        batches_idx = np.array_split(indicies, n_batches)  # Split into batches
 
+        # Shuffle data
+        indicies = np.random.permutation(np.arange(X_train.shape[0]))  
+
+        # Split into batches
+        batches_idx = np.array_split(indicies, n_batches)  
 
         for (batch_num, batch_idx) in enumerate(batches_idx):
             # Get batch data
             X = X_train[batch_idx]  # (batch_size, 784)
             Y = y_train[batch_idx]  # (batch_size,)
-
 
             # Forward pass
             h1 = fc1.forward(X)   # (64, batch)
@@ -123,9 +124,10 @@ def main():
             h3 = fc3.forward(h2)  # (10, 100)
             # h4 = fc4.forward(h3)  # (10, 100)
 
-            logits = fc4.forward(h3)  # Raw logits, no activation yet
+            # Raw logits, so no activation yet
+            logits = fc4.forward(h3)  
             
-            # Apply log_softmax manually
+            # Apply log_softmax
             log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
 
             # Accuracy    
@@ -137,10 +139,11 @@ def main():
             # Backward pass - start with combined log_softmax + NLL derivative
             dL_dlogits = nn.nll_loss_derivative(log_probs, Y)  # Shape: (batch_size, 10)
             
-            # Now backprop through fc4 (which just did linear transformation)
-            fc4.phi = nn.linear  # Make fc4 linear since we applied log_softmax manually
-            fc4.phi_prime = nn.linear_derivative
+            # Now backprop through fc4 after linear transformation
             
+            # Make fc4 linear since we applied log_softmax here
+            fc4.phi = nn.linear  
+            fc4.phi_prime = nn.linear_derivative
             dL_dh3 = fc4.backward(dL_dlogits.T)  # Note: transpose for (features, batch) format
             dL_dh2 = fc3.backward(dL_dh3)
             dL_dh1 = fc2.backward(dL_dh2)
@@ -150,7 +153,7 @@ def main():
             fc2.update_weights(alpha)
             fc3.update_weights(alpha)
             fc4.update_weights(alpha)
-            
+
             # Metrics
             losses.append(loss)
             accuracies.append(acc)
