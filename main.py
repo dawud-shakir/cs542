@@ -4,7 +4,6 @@ main.py
 
 import numpy as np
 np.random.seed(0)  # Reproducibility
-from pmat import create_grid_comm
 import layer as nn
 
 import os               # for file paths
@@ -14,6 +13,7 @@ import struct           # for unpacking binary files
 
 """ MPI """
 from mpi4py import MPI
+from pmat import pmat
 
 
 """ Data """
@@ -139,20 +139,38 @@ def main():
             # Backward pass - start with combined log_softmax + NLL derivative
             dL_dlogits = nn.nll_loss_derivative(log_probs, Y)  # Shape: (batch_size, 10)
             
+
             # Now backprop through fc4 after linear transformation
             
+            
             # Make fc4 linear since we applied log_softmax here
+            p_dL_dlogits = pmat.from_numpy(dL_dlogits) 
+
             fc4.phi = nn.linear  
             fc4.phi_prime = nn.linear_derivative
-            dL_dh3 = fc4.backward(dL_dlogits.T)  # Note: transpose for (features, batch) format
-            dL_dh2 = fc3.backward(dL_dh3)
-            dL_dh1 = fc2.backward(dL_dh2)
-            fc1.backward(dL_dh1)
+            p_dL_dh3 = fc4.backward(p_dL_dlogits.T)  # Note: transpose for (features, batch) format
+            p_dL_dh2 = fc3.backward(p_dL_dh3)
+            p_dL_dh1 = fc2.backward(p_dL_dh2)
+            fc1.backward(p_dL_dh1)
 
             fc1.update_weights(alpha)
             fc2.update_weights(alpha)
             fc3.update_weights(alpha)
             fc4.update_weights(alpha)
+
+            ############### Original version ########
+            # # Make fc4 linear since we applied log_softmax here
+            # fc4.phi = nn.linear  
+            # fc4.phi_prime = nn.linear_derivative
+            # dL_dh3 = fc4.backward(dL_dlogits.T)  # Note: transpose for (features, batch) format
+            # dL_dh2 = fc3.backward(dL_dh3)
+            # dL_dh1 = fc2.backward(dL_dh2)
+            # fc1.backward(dL_dh1)
+
+            # fc1.update_weights(alpha)
+            # fc2.update_weights(alpha)
+            # fc3.update_weights(alpha)
+            # fc4.update_weights(alpha)
 
             # Metrics
             losses.append(loss)

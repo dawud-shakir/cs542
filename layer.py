@@ -121,18 +121,22 @@ class Parallel_Layer:
         self.b1, self.b2 = betas
         self.epsilon = eps
         self.weight_decay = weight_decay
-        # self.m, self.v = np.zeros_like(self.W), np.zeros_like(self.W)  # first/second moments
         ############################################################
-        self.m, self.v = np.zeros(self.W.shape), np.zeros(self.W.shape)
+        # First/Second Moments
+
+        # First comment:
+        # self.m, self.v = np.zeros_like(self.W), np.zeros_like(self.W)  
+        
+        # Second comment:
+        # self.m, self.v = np.zeros(self.W.shape), np.zeros(self.W.shape) 
+
+        n, m = self.W.shape
+        self.m, self.v = pmat(n, m), pmat(n, m)
 
         ############################################################
         self.t = 0
 
     def _as_2d(self, X):
-        #### Reshape not implemented in pmat yet
-        if X.ndim == 1:
-            return X.reshape(-1, 1)             # (in, 1)
-
         p_X = pmat.from_numpy(X).get_full()
         # Enforce (in, batch); transpose only if it exactly matches (batch, in)
         if p_X.shape[0] != self.in_features:
@@ -141,12 +145,12 @@ class Parallel_Layer:
             else:
                 raise ValueError(f"Expected input with {self.in_features} rows, got {p_X.shape}")
         return p_X
-        # X = pmat.from_numpy(p_X, grid_comm).get_full()
-        # return X
-
+        
+        ######## Original version ##########
         # X = np.asarray(X)
-        # if X.ndim == 1:
-        #     X = X.reshape(-1, 1)             # (in, 1)
+        # # If X is a 1D array
+        # # if X.ndim == 1:
+        # #     X = X.reshape(-1, 1)             # (in, 1)
         # # Enforce (in, batch); transpose only if it exactly matches (batch, in)
         # if X.shape[0] != self.in_features:
         #     if X.ndim == 2 and X.shape[1] == self.in_features:
@@ -162,11 +166,14 @@ class Parallel_Layer:
 
        
     def forward(self, X_no_bias):
-        # X_no_bias is activations from previous layer (no bias row)
+        ######
+        # Since X_no_bias is the activation of a previous layer, which has no 
+        # bias row, we need to add it here
         X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
+        X_with_bias = self._with_bias(X_no_bias) # (in+1, batch)
 
         # (in+1, batch)
-        p_X = pmat.from_numpy(self._with_bias(X_no_bias))
+        p_X = pmat.from_numpy(X_with_bias)
 
         # (out, batch)
         p_a = self.W @ p_X
@@ -174,16 +181,50 @@ class Parallel_Layer:
 
         assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
 
-        self.X = p_X.get_full()  # (in+1, batch)
+        self.X = p_X.get_full()  # (in+1, batch)   
         self.a = p_a.get_full()  # (out, batch)
         self.h = p_h.get_full()  # (out, batch)
 
         return self.h
 
+        # #### First pmat version #########################################
+        #         # X_no_bias is activations from previous layer (no bias row)
+        # X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
+        # X_with_bias = self._with_bias(X_no_bias) # (in+1, batch)
+
+        # # (in+1, batch)
+        # p_X = pmat.from_numpy(X_with_bias)
+
+        # # (out, batch)
+        # p_a = self.W @ p_X
+        # p_h = self.phi(p_a)
+
+        # assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
+
+        # self.X = p_X.get_full()  # (in+1, batch)   
+        # self.a = p_a.get_full()  # (out, batch)
+        # self.h = p_h.get_full()  # (out, batch)
+
+        # return self.h
+
+        ##### Original version ##########################################
+        # X_no_bias is activations from previous layer (no bias row)
+        # X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
+
+        # # Input's first row is the bias row
+        # self.X = self._with_bias(X_no_bias)  # (in+1, batch)    
+        # self.a = self.W @ self.X             # (out, batch)
+        # self.h = self.phi(self.a)
+        
+        # # Safety check:
+        # assert self.W.shape[1] == self.X.shape[0], (self.W.shape, self.X.shape)
+
+        # return self.h
+
     def backward(self, dL_dh_next):
         p_a = pmat.from_numpy(self.a)
         p_X = pmat.from_numpy(self.X)
-        p_dL_dh_next = pmat.from_numpy(dL_dh_next)
+        p_dL_dh_next = dL_dh_next
 
         p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
         assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
@@ -195,9 +236,10 @@ class Parallel_Layer:
 
         p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
 
-        self.dL_dW = p_dL_dW.get_full()
-        return p_dL_dh_prev.get_full()
+        self.dL_dW = p_dL_dW
+        return p_dL_dh_prev
 
+        # ##### First pmat version #########################################
         # p_a = pmat.from_numpy(self.a)
         # p_X = pmat.from_numpy(self.X)
         # p_dL_dh_next = pmat.from_numpy(dL_dh_next)
@@ -225,7 +267,7 @@ class Parallel_Layer:
             dL_dh_prev: gradient to pass to previous layer (shape: in_prev, batch).
         """
 
-
+        ##### Original version ##########################################
         # # Local gradient wrt pre-activation a
         # dL_da = dL_dh_next * self.phi_prime(self.a)          # (out, batch)
         # assert dL_da.shape == self.a.shape, (dL_da.shape, self.a.shape)
@@ -240,7 +282,7 @@ class Parallel_Layer:
 
         
     def update_weights(self, alpha=1e-3):
-        p_dL_dW = pmat.from_numpy(self.dL_dW)
+        p_dL_dW = self.dL_dW
 
         """ Adam optimizer update """
         self.t += 1
@@ -248,8 +290,8 @@ class Parallel_Layer:
         if self.weight_decay != 0:
             p_g = p_g + self.weight_decay * self.W
 
-        p_m = pmat.from_numpy(self.m)
-        p_v = pmat.from_numpy(self.v)
+        p_m = self.m
+        p_v = self.v
 
         # first/second moments (momentum/velocity)
         p_m = self.b1 * p_m + (1 - self.b1) * p_g
@@ -261,10 +303,34 @@ class Parallel_Layer:
 
         self.W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
 
-        self.m = p_m.get_full()
-        self.v = p_v.get_full()
-
         self.dL_dW = None # Do not allow the same gradient to be used again
+
+        ### First pmat version #########################################
+        # p_dL_dW = pmat.from_numpy(self.dL_dW)
+
+        # """ Adam optimizer update """
+        # self.t += 1
+        # p_g = p_dL_dW
+        # if self.weight_decay != 0:
+        #     p_g = p_g + self.weight_decay * self.W
+
+        # p_m = pmat.from_numpy(self.m)
+        # p_v = pmat.from_numpy(self.v)
+
+        # # first/second moments (momentum/velocity)
+        # p_m = self.b1 * p_m + (1 - self.b1) * p_g
+        # p_v = self.b2 * p_v + (1 - self.b2) * (p_g * p_g)
+
+        # # bias correction
+        # p_m_hat = p_m / (1 - self.b1 ** self.t)
+        # p_v_hat = p_v / (1 - self.b2 ** self.t)
+
+        # self.W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
+
+        # self.m = p_m.get_full()
+        # self.v = p_v.get_full()
+
+        # self.dL_dW = None # Do not allow the same gradient to be used again
 
 
         # ### Original ##################################################
