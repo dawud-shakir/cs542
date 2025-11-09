@@ -189,11 +189,30 @@ class Parallel_Layer:
         assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
         p_dL_dW = p_dL_da @ p_X.T
 
-        p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
+        # p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
+
+        p_W_no_bias = self.W.remove_first_column()
+
         p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
 
         self.dL_dW = p_dL_dW.get_full()
         return p_dL_dh_prev.get_full()
+
+        # p_a = pmat.from_numpy(self.a)
+        # p_X = pmat.from_numpy(self.X)
+        # p_dL_dh_next = pmat.from_numpy(dL_dh_next)
+
+        # p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
+        # assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
+        # p_dL_dW = p_dL_da @ p_X.T
+
+        # p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
+
+        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
+
+        # self.dL_dW = p_dL_dW.get_full()
+        # return p_dL_dh_prev.get_full()
+
 
         """
         Backprop through this layer.
