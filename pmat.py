@@ -92,6 +92,47 @@ class pmat:
 
         self._set_local(local)
 
+        
+        ####################### New Way (with extents) ########################
+        
+        # Block size
+        n_loc = int(np.ceil(n / Pr))
+        m_loc = int(np.ceil(m / Pc))
+
+        # Row extents
+        x, x_rem = divmod(n, n_loc)
+        n_loc_extent = [self.n_loc] * x
+        if x < Pr:
+            n_loc_extent += [x_rem]
+        n_loc_extent += [0] * (Pr - len(n_loc_extent))  # pad with zeros if needed
+
+        # Column extents
+        y, y_rem = divmod(m, m_loc)
+        m_loc_extent = [self.m_loc] * y
+        if y < Pc:
+            m_loc_extent += [y_rem]
+        m_loc_extent += [0] * (Pc - len(m_loc_extent))  # pad with zeros if needed
+
+        extent = [[(0, 0) if a == 0 or b == 0 else (a, b) for b in m_loc_extent] for a in n_loc_extent]
+
+        # extent = [[(a, b) for b in m_loc_extent] for a in n_loc_extent]
+
+
+        n_loc_pos = [0]
+        for v in n_loc_extent[:-1]:
+            n_loc_pos.append(n_loc_pos[-1] + v)
+
+        m_loc_pos = [0]
+        for v in m_loc_extent[:-1]:
+            m_loc_pos.append(m_loc_pos[-1] + v)
+
+        position = [[(a,b) for b in m_loc_pos] for a in n_loc_pos]
+        self.extent = extent
+        self.loc_position = position
+
+        self.block_size = extent[self.coords[0]][self.coords[1]]
+        self.block_loc = position[self.coords[0]][self.coords[1]]
+
  
 
     ############################################################################
@@ -116,60 +157,76 @@ class pmat:
         return pmat.from_numpy(val) if isinstance(val, np.ndarray) else val
 
     def remove_first_column(self):
-        new_n = self.n
-        new_m = self.m - 1
-
-        other = pmat(new_n, new_m)
-
-        horz_group = pmat.grid_comm.Sub([False, True])  # rows
-        horz_group.periods = ([False, False])
-
-        # for col in range(pmat.grid_comm.dims[1] - 1):
-
-        if horz_group.rank < horz_group.dims[1] - 1:
-            horz_group.Recv(other.local[-1,:], horz_group.rank + 1)
-
-        if horz_group.rank > 0:
-            horz_group.Send(self.local[0,:], horz_group.rank - 1)
-                                
-        #     pmat.grid_comm.Sendrecv(self.local[0,:], 
-        
-        # other.local[-1,:]
-
-        # grid_comm = create_grid_comm()
-        # new_M = pmat(bottom-top, right-left, grid_comm)   # start with all zeros
-
-
-        # axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
-
-        # assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
-
-        # row_sum = []
-
-        #     for row in range(M.n_loc):
-        #         # Reduce to the root of each group
-        #         row_sum.append(horz_group.reduce(np.sum(M.local[row, :]), op=MPI.SUM, root=0))
-
-        #     if M.grid_comm.coords[1] == 0:
-        #         row_sum = np.array([x for x in row_sum if x is not np.nan]).flatten().reshape(-1, 1) # maxs is now a column vector
-        #     else:
-        #         row_sum = None
-
-        #     return pmat(M.n, 1, row_sum)
-
-
-
-
-
-
-
-        full = M.get_full()[top:bottom, left:right]
-        new_M = pmat.from_numpy(full)
-
-
-
-        return new_M
     
+        col_offset = 1  # remove first column
+
+        assert self.m > 1, "matrix only has one column"
+                
+        n, m = self.shape        
+        local = self.get_local()
+
+        coords = pmat.grid_comm.coords
+        extent = self.extent[coords[0]][coords[1]]
+        position = self.loc_position[coords[0]][coords[1]]
+
+        row_start, row_end = position[0], position[0] + extent[0]
+        col_start, col_end = position[1], position[1] + extent[1]
+
+        # Set up the submatrix
+        submat = pmat(n, m - 1)
+        submat_extent = submat.extent[coords[0]][coords[1]]
+        submat_position = submat.loc_position[coords[0]][coords[1]]
+
+        submat_row_start, submat_row_end = submat_position[0], submat_position[0] + submat_extent[0]
+        submat_col_start, submat_col_end = col_offset + submat_position[1], col_offset + submat_position[1] + submat_extent[1]
+
+        submat_local = np.zeros_like(submat.local)
+
+        ########################################################################
+        # Write each rank's local block to the shared array
+        ########################################################################
+        type = self.local.dtype
+        type_bytes = np.dtype(type).itemsize
+        size = int(np.prod(self.shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=(self.n, self.m))
+
+        # Start an epoch and synchronize processes before writing
+        win.Fence()
+
+        # Each rank writes its original matrix block to the shared array
+        shared_array[row_start:row_end, col_start:col_end] = local
+
+        ############################################################################
+        # End the epoch and synchronize processes (again) before reading
+        ############################################################################
+        
+        win.Fence()
+        
+        # Each rank reads its submatrix block from the shared array
+        submat_local[:submat_extent[0], :submat_extent[1]] = shared_array[submat_row_start:submat_row_end, submat_col_start:submat_col_end]
+        submat.local = submat_local.copy()  # Added copy ... didn't fix the issue
+        
+        ############################################################################
+        # End the epoch and synchronize processes
+        ############################################################################
+        win.Fence()
+
+        # Free the shared memory
+        win.free()
+
+        return submat    
+
+    def get_local(self):
+        n_loc, m_loc = self.extent[self.coords[0]][self.coords[1]]
+        return self.local[:n_loc, :m_loc]
+
     def _set_local(self, local):
         # Local block will be (n_pad, m_pad) larger than local if there is zero padding.
         self.local = np.zeros((self.n_loc, self.m_loc), dtype=np.double)
@@ -196,7 +253,7 @@ class pmat:
         # Set local block
         self.local[:local_block.shape[0], :local_block.shape[1]] = local_block
 
-    def get_full(self):
+    def get_full(self, remove_padding=True):
         # Gather all blocks at root
         Pr = pmat.grid_comm.dims[0]
         Pc = pmat.grid_comm.dims[1]
@@ -221,10 +278,9 @@ class pmat:
                 # Copy block into grid
                 M[row*self.n_loc:(row+1)*self.n_loc, col*self.m_loc:(col+1)*self.m_loc] = block #.reshape(self.n_loc, self.m_loc)
 
-            # Truncate to original size (n x m) in case of padding
-            M = M[:self.n, :self.m]
 
-        return M
+
+        return M[:self.n, :self.m] if remove_padding else M
 
     ############################################################################
     # Arithmetic operators
@@ -286,6 +342,11 @@ class pmat:
         return pmat(self.n, self.m, -self.local)
 
     def __matmul__(self, other: 'pmat'):
+        
+
+
+        return matmul(self, other)
+
         # Cannon's Algorithm
 
         assert self.m == other.n, f"A @ B: A.m  = {self.m} and B.n = {other.n}"
@@ -438,8 +499,119 @@ class pmat:
             if isinstance(other, pmat):
                 return pmean(other, **kwargs)
 
-        return NotImplemented
+        raise NotImplementedError(f"{func} not implemented for pmat")
     
+
+# ANSI color helpers
+def set_text_color(code):
+    # code is an integer (e.g. 31 for red, 0 to reset)
+    print(f"\033[{code}m", end="", flush=True)
+
+def reset_text_color():
+    print("\033[0m", end="", flush=True)
+
+def print_pretty(pmatrix, name="", remove_padding=True):
+        # print("p_rows, p_cols:", p_rows, p_cols)
+        # print("n, m:", n, m)
+        # print("n_local, n_rem:", n_local, n_rem)
+        # print("m_local, m_rem:", m_local, m_rem)
+
+        if name != "":
+            if pmatrix.grid_comm.rank == 0:
+                print(f"{name}:")
+
+        full_matrix = pmatrix.get_full(remove_padding)
+                    
+        for row in range(pmatrix.n):
+            col = 0
+
+            if row % pmatrix.n_loc == 0:
+                row_color = (row * pmatrix.m) // pmatrix.n_loc
+            while col < pmatrix.m:
+                color_code = 31 + ((row_color + col))   # 7 possible colors
+                # print(f"row {row} col {j} color {color_code}", flush=True)
+
+                block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + pmatrix.m_loc])
+                
+                if pmatrix.grid_comm.rank == 0:
+                    Pr = row // pmatrix.n_loc
+                    Pc = col // pmatrix.m_loc
+                    # color_code = 31 + (Pr + Pc) % 7  # 7 possible colors
+                    # set_text_color(color_code)
+                    palette = [196, 202, 208, 214, 220, 226, 82, 46, 21, 51, 93, 129, 201, 200, 199, 198]
+                    color_code = palette[(Pr + Pc * pmatrix.grid_comm.dims[1]) % len(palette)]
+                    print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+                    
+                    # color_code = (Pr * pmatrix.grid_comm.dims[1] + Pc) * 13 % 256
+                    # print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+                    
+                    # print(block_str, end=" ", flush=True)
+                    # reset_text_color()
+        
+                col += pmatrix.m_loc
+
+            # New line after each global row
+            if pmatrix.grid_comm.rank == 0:
+                print() 
+        
+        pmat.grid_comm.Barrier()
+
+def print_matrix(my_list, name=""):
+    rows = len(my_list)
+    cols = len(my_list[0])
+    if name != "":
+        print(f"{name}:")
+    for i in range(rows):
+        for j in range(cols):
+            if pmat.grid_comm.rank == 0:
+                print(f"{my_list[i][j]}", end=" ")
+        print()
+    print()
+
+
+############################################################################
+# Matrix-matrix multiplication function
+############################################################################
+
+def matmul(A: pmat, B: pmat):
+    assert A.m == B.n, f"A @ B: A.m:{A.m} != B.n:{B.n}"
+
+
+
+    # Cannon's Algorithm
+    
+    C = np.zeros((A.n_loc, B.m_loc))
+
+    # Total steps over grid 
+    num_steps = min(pmat.grid_comm.dims)
+
+    # Deep copies for Sendrecv_replace
+    A_block = A.local.copy()
+    B_block = B.local.copy()
+
+    # Skew (initial alignment)
+    for _ in range(A.coords[0]):
+        src, dst = pmat.grid_comm.Shift(1, -1)
+        pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
+
+    for _ in range(A.coords[1]):
+        src, dst = pmat.grid_comm.Shift(0, -1)
+        pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
+
+    for _ in range(num_steps):
+        # Multiply and accumulate
+        C += A_block @ B_block
+
+        # Shift A left
+        src, dst = pmat.grid_comm.Shift(1, -1)
+        pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
+
+        # Shift B up
+        src, dst = pmat.grid_comm.Shift(0, -1)
+        pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
+
+    return pmat(A.n, B.m, local=C)
+
 
 ############################################################################
 # Non-ufunc pmat functions (sum, mean, max, maximum, etc.)
@@ -529,6 +701,8 @@ def test(n, k, m, dtype=np.double):
     rank = comm.Get_rank()
     num_procs = comm.Get_size()
 
+
+
     # Process grid and panel width
     Pr = int(np.sqrt(num_procs))
     Pc = int(np.sqrt(num_procs))
@@ -539,15 +713,15 @@ def test(n, k, m, dtype=np.double):
 
 
     def check(M1: pmat, M2: np.ndarray, str=""):
-        M1_pmat = M1.get_full()
+        pmat_as_numpy = M1.get_full()
         if rank == 0:
             assert isinstance(M1, pmat) and isinstance(M2, np.ndarray), f"{str} failed instance check\ntype(M1)={type(M1)} and type(M2)={type(M2)}"
             
-            assert np.allclose(M1_pmat, M2), f"{str} failed allclose\nM1:\n{M1_pmat}\nM2:\n{M2}"
+            assert np.allclose(pmat_as_numpy, M2), f"{str} failed allclose\nM1:\n{pmat_as_numpy}\nM2:\n{M2}"
 
             # assert M1_pmat.dtype == M2.dtype, f"{str} failed type check\ndtype(M1)={M1_pmat.dtype} and dtype(M2)={M2.dtype}"
             
-            print(f"\t{str}\t\t\t\t... passed allclose")
+            print(f"\t{str:<20}...\033[31mpassed\033[0m allclose")
 
     ################################################################
     # Start tests
@@ -562,16 +736,6 @@ def test(n, k, m, dtype=np.double):
 
     A = pmat.from_numpy(A_mat)
 
-    
-    check(pmat.from_numpy(np.ones_like(A)), np.ones_like(A_mat), "ones_like")
-    check(pmaximum(32, A), np.maximum(32, A_mat), "maximum(32, A)")
-
-    ###### Too large values cause exp to overflow/go to inf (normally, -1 to 1 range)
-    #######################check(np.exp(A), np.exp(A_mat), "exp(A)")
-    #######################check(np.exp(A).astype(float), np.exp(A_mat).astype(float), "astype")
-    check(np.log(A), np.log(A_mat), "log(A)")
-
-    check(A > 5, A_mat > 5, "A > 5")
     ################################################################
     # Non-Element-wise operations
 
@@ -610,12 +774,16 @@ def test(n, k, m, dtype=np.double):
     check(pmaximum(32, A), np.maximum(32, A_mat), "maxmium(32, A)")
 
     pmean_result = pmean(A, axis=1)
-    pmax_result = pmax(A, axis=1)
     if pmean_result is not None:
         check(pmean_result, np.mean(A_mat, axis=1, keepdims=True), "mean(A, axis=1)")
+
+    pmax_result = pmax(A, axis=1)
     if pmax_result is not None:
         check(pmax_result, np.max(A_mat, axis=1, keepdims=True), "max(A, axis=1)")
 
+    check(np.log(A), np.log(A_mat), "log(A)")
+
+    check(A > 5, A_mat > 5, "A > 5")
     ################################################################
     # Vecmat and Matvec operation 
     
@@ -634,9 +802,26 @@ def test(n, k, m, dtype=np.double):
     ################################################################
 
     if rank == 0:
-        print()
+        A_extent = A.extent
+        B_extent = B.extent
 
-# if __name__ == "__main__":
+
+        print_matrix(A.extent, name="A extent")
+        print_matrix(B.extent, name="B extent")
+        print()
+        
+    print_pretty(A, "A", remove_padding=False)
+    print_pretty(B, "B", remove_padding=False)
+
+        # for i in range(Pr):
+        #     for j in range(Pc):
+        #         print(f"{A_extent[i][j][1]} {B_extent[j][i][0]}")
+   
+
+
+
+
+if __name__ == "__main__":
 #     # Test input
 
         # Large matrices
@@ -644,11 +829,11 @@ def test(n, k, m, dtype=np.double):
 
 #     test(n=28*28, k=64, m=64)
 
-#     # Non-square matrices
-#     # test(n=9, k=5, m=16)
+    # Non-square matrices
+    test(n=9, k=5, m=16)
 
-#     # Square matrices
-#     # test(n=8, k=8, m=16)
+    # Square matrices
+    test(n=8, k=8, m=16)
 
 
 
