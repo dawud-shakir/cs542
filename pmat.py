@@ -27,31 +27,89 @@ class pmat:
     grid_comm = create_grid_comm()
 
     @staticmethod
-    def from_numpy(M_numpy: np.ndarray):
-        """
-        Convert a full numpy array to a distributed pmat
-        """
-        rank = pmat.grid_comm.Get_rank()
-        row, col = pmat.grid_comm.Get_coords(rank)
-        
-        n, m = M_numpy.shape
+    def from_numpy(M_numpy: np.ndarray) -> 'pmat':
+    
+        n, m = M_numpy.shape       
 
-        n_loc = np.ceil(n / pmat.grid_comm.dims[0]).astype(int)
-        m_loc = np.ceil(m / pmat.grid_comm.dims[1]).astype(int)
+        coords = pmat.grid_comm.coords
+
+        ########################################################################
+        # Create a new pmat and its extent and position before reading 
+        # numpy array from shared memory
+        ########################################################################
+
+
+        M_pmat = pmat(n, m)
+        extent = M_pmat.extent[coords[0]][coords[1]]
+        position = M_pmat.position[coords[0]][coords[1]]
+
+        row_start, row_end = position[0], position[0] + extent[0]
+        col_start, col_end = position[1], position[1] + extent[1]
+
+        local = M_pmat.local
+
+        ########################################################################
+        # Set up the shared array
+        ########################################################################
+        type = M_pmat.local.dtype
+        type_bytes = np.dtype(type).itemsize
+        size = int(np.prod(M_pmat.shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=(M_pmat.n, M_pmat.m))
+
+        shared_array[:] = M_numpy[:]
+
+        ############################################################################
+        # Start an epoch and synchronize processes before reading
+        ############################################################################
+        win.Fence()
+
+        # Each rank reads its submatrix block from the shared array
+        local[:extent[0], :extent[1]] = shared_array[row_start:row_end, col_start:col_end]
+        M_pmat.local = local.copy()  # Added copy ... didn't fix the issue
+        
+        ############################################################################
+        # End the epoch and synchronize processes
+        ############################################################################
+        win.Fence()
+
+        # Free the shared memory
+        win.free()
+
+        return M_pmat
+
+    # @staticmethod
+    # def from_numpy(M_numpy: np.ndarray):
+    #     """
+    #     Convert a full numpy array to a distributed pmat
+    #     """
+    #     rank = pmat.grid_comm.Get_rank()
+    #     row, col = pmat.grid_comm.Get_coords(rank)
+        
+    #     n, m = M_numpy.shape
+
+    #     n_loc = np.ceil(n / pmat.grid_comm.dims[0]).astype(int)
+    #     m_loc = np.ceil(m / pmat.grid_comm.dims[1]).astype(int)
        
-        row_start = row * n_loc
-        row_end = min((row + 1) * n_loc, n)
-        col_start = col * m_loc
-        col_end = min((col + 1) * m_loc, m)
+    #     row_start = row * n_loc
+    #     row_end = min((row + 1) * n_loc, n)
+    #     col_start = col * m_loc
+    #     col_end = min((col + 1) * m_loc, m)
 
-        block = M_numpy[row_start:row_end, col_start:col_end]
+    #     block = M_numpy[row_start:row_end, col_start:col_end]
         
-        # Pad with zeros
-        local = np.zeros((n_loc, m_loc), dtype=np.double)
-        # Copy from numpy block up to padding        
-        local[:block.shape[0], :block.shape[1]] = block
+    #     # Pad with zeros
+    #     local = np.zeros((n_loc, m_loc), dtype=np.double)
+    #     # Copy from numpy block up to padding        
+    #     local[:block.shape[0], :block.shape[1]] = block
 
-        return pmat(n, m, local)
+    #     return pmat(n, m, local)
     
     @staticmethod
     def resize(top: int, bottom: int, left: int, right: int, M: 'pmat'):
@@ -76,7 +134,7 @@ class pmat:
         self.n = n
         self.m = m
         self.shape = (n, m)
-        self.ndim = 2
+        self.ndim = 2           # used in layer._as_2d
         
         self.rank = pmat.grid_comm.Get_rank()
         self.coords = pmat.grid_comm.Get_coords(self.rank)
@@ -128,7 +186,7 @@ class pmat:
 
         position = [[(a,b) for b in m_loc_pos] for a in n_loc_pos]
         self.extent = extent
-        self.loc_position = position
+        self.position = position
 
         self.block_size = extent[self.coords[0]][self.coords[1]]
         self.block_loc = position[self.coords[0]][self.coords[1]]
@@ -167,7 +225,7 @@ class pmat:
 
         coords = pmat.grid_comm.coords
         extent = self.extent[coords[0]][coords[1]]
-        position = self.loc_position[coords[0]][coords[1]]
+        position = self.position[coords[0]][coords[1]]
 
         row_start, row_end = position[0], position[0] + extent[0]
         col_start, col_end = position[1], position[1] + extent[1]
@@ -175,7 +233,7 @@ class pmat:
         # Set up the submatrix
         submat = pmat(n, m - 1)
         submat_extent = submat.extent[coords[0]][coords[1]]
-        submat_position = submat.loc_position[coords[0]][coords[1]]
+        submat_position = submat.position[coords[0]][coords[1]]
 
         submat_row_start, submat_row_end = submat_position[0], submat_position[0] + submat_extent[0]
         submat_col_start, submat_col_end = col_offset + submat_position[1], col_offset + submat_position[1] + submat_extent[1]

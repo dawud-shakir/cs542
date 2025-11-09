@@ -49,8 +49,85 @@ from pmat import pmat, create_grid_comm, print_matrix
 def make_text_green(text):
     return f"\033[38;5;22m{text}\033[0m"
 
-def remove_first_column(M: pmat) -> pmat:
+def from_numpy(M_numpy: np.ndarray) -> pmat:
     
+    n, m = M_numpy.shape       
+
+    coords = pmat.grid_comm.coords
+
+    ########################################################################
+    # Create a new pmat and its extent and position before reading 
+    # numpy array from shared memory
+    ########################################################################
+
+
+    M_pmat = pmat(n, m)
+    extent = M_pmat.extent[coords[0]][coords[1]]
+    position = M_pmat.position[coords[0]][coords[1]]
+
+    row_start, row_end = position[0], position[0] + extent[0]
+    col_start, col_end = position[1], position[1] + extent[1]
+
+    local = M_pmat.local
+
+    ########################################################################
+    # Set up the shared array
+    ########################################################################
+    type = M_pmat.local.dtype
+    type_bytes = np.dtype(type).itemsize
+    size = int(np.prod(M_pmat.shape)) * type_bytes
+
+    win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+    assert win is not None, "win is None"
+        
+    # Buffer is allocated by rank 0, but all processes can access it
+    buf, _ = win.Shared_query(0)
+    shared_array = np.ndarray(buffer=buf, dtype=type, shape=(M_pmat.n, M_pmat.m))
+
+    shared_array[:] = M_numpy[:]
+
+    ############################################################################
+    # Start an epoch and synchronize processes before reading
+    ############################################################################
+    win.Fence()
+
+    # Each rank reads its submatrix block from the shared array
+    local[:extent[0], :extent[1]] = shared_array[row_start:row_end, col_start:col_end]
+    M_pmat.local = local.copy()  # Added copy ... didn't fix the issue
+    
+    ############################################################################
+    # End the epoch and synchronize processes
+    ############################################################################
+    win.Fence()
+
+    # Free the shared memory
+    win.free()
+
+    return M_pmat
+
+
+def test_pmat_shared_memory_from_numpy(n, m):
+    A_numpy = np.arange(1, n * m + 1).reshape(n, m).astype(np.double)
+    A_pmat = from_numpy(A_numpy)
+
+    if not np.allclose(A_pmat.get_full(), A_numpy):
+        raise ValueError(f"\033[38;5;22m n={n}, m={m}: submat does not match! \033[0m")
+    else:
+        if rank == 0:
+            test_name = f"test_pmat_shared_memory_from_numpy n={n}, m={m}"
+            print(f"{test_name:<30} ...\033[31m" + "passed" + "\033[0m")
+
+    # if rank == 0:
+    #     print("Shared Array after fencing:")
+    #     print(shared_array)
+
+    # Ensure all ranks have finished before starting the next test
+    MPI.COMM_WORLD.Barrier()
+
+##############################################################################
+
+def remove_first_column(M: pmat) -> pmat:
 
 
     col_offset = 1  # remove first column
@@ -62,7 +139,7 @@ def remove_first_column(M: pmat) -> pmat:
 
     coords = pmat.grid_comm.coords
     extent = M.extent[coords[0]][coords[1]]
-    position = M.loc_position[coords[0]][coords[1]]
+    position = M.position[coords[0]][coords[1]]
 
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]
@@ -70,7 +147,7 @@ def remove_first_column(M: pmat) -> pmat:
     # Set up the submatrix
     submat = pmat(n, m - 1)
     submat_extent = submat.extent[coords[0]][coords[1]]
-    submat_position = submat.loc_position[coords[0]][coords[1]]
+    submat_position = submat.position[coords[0]][coords[1]]
 
     submat_row_start, submat_row_end = submat_position[0], submat_position[0] + submat_extent[0]
     submat_col_start, submat_col_end = col_offset + submat_position[1], col_offset + submat_position[1] + submat_extent[1]
@@ -106,7 +183,7 @@ def remove_first_column(M: pmat) -> pmat:
     
     # Each rank reads its submatrix block from the shared array
     submat_local[:submat_extent[0], :submat_extent[1]] = shared_array[submat_row_start:submat_row_end, submat_col_start:submat_col_end]
-    submat.local = submat_local.copy()  # Added copy ... didn't fix the issue
+    submat.local = submat_local
     
     ############################################################################
     # End the epoch and synchronize processes
@@ -118,61 +195,7 @@ def remove_first_column(M: pmat) -> pmat:
 
     return submat
 
-
-# def remove_first_column(M: pmat) -> pmat:
-#     col_offset = 1  # remove first column
-
-#     assert M.m > 1, "matrix only has one column"
-
-
-#     # shared_array, shared_mem = create_shared_memory_array((4, 4), dtype='d')
-#     shared_array, shared_mem = create_shared_memory_array((M.n, M.m), dtype='d')
-#     assert shared_mem.win is not None, "shared_mem.win is None"
-
-#     # Start an epoch for RMA operations
-#     shared_mem.win.Fence()
-
-
-#     ########################################################################
-#     # Write each rank's local block to the shared array
-#     ########################################################################
-            
-#     n, m = M.shape        
-#     local = M.get_local()
-
-#     coords = pmat.grid_comm.coords
-#     extent = M.extent[coords[0]][coords[1]]
-#     position = M.loc_position[coords[0]][coords[1]]
-
-#     row_start, row_end = position[0], position[0] + extent[0]
-#     col_start, col_end = position[1], position[1] + extent[1]
-
-#     shared_array[row_start:row_end, col_start:col_end] = local
-
-#     submat = pmat(n, m - 1)
-#     submat_extent = submat.extent[coords[0]][coords[1]]
-#     submat_position = submat.loc_position[coords[0]][coords[1]]
-
-#     # local_submat = submat.get_local()
-#     submat_row_start, submat_row_end = submat_position[0], submat_position[0] + submat_extent[0]
-#     submat_col_start, submat_col_end = col_offset + submat_position[1], col_offset + submat_position[1] + submat_extent[1]
-
-#     submat_local = np.zeros_like(submat.local)
-    
-#     # Synchronize all ranks (again) before reading
-#     shared_mem.win.Fence()
-
-#     submat_local[:submat_extent[0], :submat_extent[1]] = shared_array[submat_row_start:submat_row_end, submat_col_start:submat_col_end]
-#     submat.local = submat_local.copy()  # Added copy ... didn't fix the issue
-    
-    
-#     ############################################################################
-#     # End the epoch and synchronize
-#     shared_mem.win.Fence()
-
-#     free_shared_memory_array(shared_mem)
-
-#     return submat
+##############################################################################
 
 def test_pmat_shared_memory_remove_column(n, m):
     A_numpy = np.arange(1, n * m + 1).reshape(n, m).astype(np.double)
@@ -185,7 +208,9 @@ def test_pmat_shared_memory_remove_column(n, m):
         raise ValueError(f"\033[38;5;22m n={n}, m={m}: submat does not match! \033[0m")
     else:
         if rank == 0:
-            print(f"n={n}, m={m} ...\033[31m" + "passed" + "\033[0m")
+            test_name = f"test_pmat_shared_memory_remove_column n={n}, m={m}"
+            print(f"{test_name:<30} ...\033[31m" + "passed" + "\033[0m")
+
 
     # if rank == 0:
     #     print("Shared Array after fencing:")
@@ -217,7 +242,7 @@ def write_pmat_to_shared_memory(M: pmat):
 
     coords = pmat.grid_comm.coords
     extent = M.extent[coords[0]][coords[1]]
-    position = M.loc_position[coords[0]][coords[1]]
+    position = M.position[coords[0]][coords[1]]
 
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]
@@ -253,7 +278,8 @@ def test_pmat_shared_memory_with_fencing(n, m):
         raise ValueError(f"\033[38;5;22m n={n}, m={m}: shared memory array does not match original matrix! \033[0m")
     else:
         if rank == 0:
-            print(f"n={n}, m={m} ...\033[31m" + "passed" + "\033[0m")
+            test_name = f"test_pmat_shared_memory_with_fencing n={n}, m={m}"
+            print(f"{test_name:<30} ...\033[31m" + "passed" + "\033[0m")
 
     # if rank == 0:
     #     print("Shared Array after fencing:")
@@ -306,6 +332,33 @@ if __name__ == "__main__":
     if rank == 0:
         print(f"grid size: {grid.dims[0]} x {grid.dims[1]}")
 
+
+    ##############################################################################
+    # Test creating pmat from numpy using shared memory
+    ##############################################################################
+    n, m = 9, 5
+    test_pmat_shared_memory_from_numpy(n, m)
+
+    n, m = 8, 8
+    test_pmat_shared_memory_from_numpy(n, m)
+
+    n, m = 16, 12
+    test_pmat_shared_memory_from_numpy(n, m)
+
+    n, m = 64, 10
+    test_pmat_shared_memory_from_numpy(n, m)
+
+    n, m = 65, 10
+    test_pmat_shared_memory_from_numpy(n, m)
+
+
+    n, m = 28*28, 1000
+    test_pmat_shared_memory_from_numpy(n, m)
+    exit()
+
+    ##############################################################################
+    # Test removing first column from pmat using shared memory
+    ##############################################################################
     n, m = 9, 5
     test_pmat_shared_memory_remove_column(n, m)
 
@@ -320,8 +373,10 @@ if __name__ == "__main__":
 
     n, m = 65, 10
     test_pmat_shared_memory_remove_column(n, m)
-    exit()
 
+
+    ##############################################################################
+    # Test writing pmat to shared memory with fencing
     # try:
     n, m = 9, 5
     test_pmat_shared_memory_with_fencing(n, m)
