@@ -136,8 +136,7 @@ class Parallel_Layer:
         ############################################################
         self.t = 0
 
-    def _as_2d(self, X):
-        p_X = pmat.from_numpy(X).get_full()
+    def _as_2d(self, p_X):
         # Enforce (in, batch); transpose only if it exactly matches (batch, in)
         if p_X.shape[0] != self.in_features:
             if p_X.ndim == 2 and p_X.shape[1] == self.in_features:
@@ -159,33 +158,58 @@ class Parallel_Layer:
         #         raise ValueError(f"Expected input with {self.in_features} rows, got {X.shape}")
         # return X
 
-    def _with_bias(self, X_no_bias):
-        # Input's first row is the bias row (1s)
-        ones = np.ones((1, X_no_bias.shape[1])) 
-        return np.vstack([ones, X_no_bias])
+    def _with_bias(self, p_X_no_bias):
+        return p_X_no_bias.stack_ones_on_top()
+
+
+        ######## Original version ##########
+        # # Input's first row is the bias row (1s)
+        # ones = np.ones((1, X_no_bias.shape[1])) 
+        # return np.vstack([ones, X_no_bias])
 
        
     def forward(self, X_no_bias):
+        p_X_no_bias = pmat.from_numpy(X_no_bias) if not isinstance(X_no_bias, pmat) else X_no_bias
+
+        
         ######
         # Since X_no_bias is the activation of a previous layer, which has no 
         # bias row, we need to add it here
-        X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
-        X_with_bias = self._with_bias(X_no_bias) # (in+1, batch)
-
-        # (in+1, batch)
-        p_X = pmat.from_numpy(X_with_bias)
+        p_X_no_bias = self._as_2d(p_X_no_bias)   # (in, batch)
+        self.p_X = self._with_bias(p_X_no_bias) # (in+1, batch)
 
         # (out, batch)
-        p_a = self.W @ p_X
+        p_a = self.W @ self.p_X
         p_h = self.phi(p_a)
 
-        assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
+        assert self.W.shape[1] == self.p_X.shape[0], (self.W.shape, self.p_X.shape)
 
-        self.X = p_X.get_full()  # (in+1, batch)   
         self.a = p_a.get_full()  # (out, batch)
         self.h = p_h.get_full()  # (out, batch)
 
         return self.h
+
+        #### Second pmat version ############################
+        # ######
+        # # Since X_no_bias is the activation of a previous layer, which has no 
+        # # bias row, we need to add it here
+        # X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
+        # X_with_bias = self._with_bias(X_no_bias) # (in+1, batch)
+
+        # # (in+1, batch)
+        # p_X = pmat.from_numpy(X_with_bias)
+
+        # # (out, batch)
+        # p_a = self.W @ p_X
+        # p_h = self.phi(p_a)
+
+        # assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
+
+        # self.X = p_X.get_full()  # (in+1, batch)   
+        # self.a = p_a.get_full()  # (out, batch)
+        # self.h = p_h.get_full()  # (out, batch)
+
+        # return self.h
 
         # #### First pmat version #########################################
         #         # X_no_bias is activations from previous layer (no bias row)
@@ -223,12 +247,11 @@ class Parallel_Layer:
 
     def backward(self, dL_dh_next):
         p_a = pmat.from_numpy(self.a)
-        p_X = pmat.from_numpy(self.X)
         p_dL_dh_next = dL_dh_next
 
         p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
         assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
-        p_dL_dW = p_dL_da @ p_X.T
+        p_dL_dW = p_dL_da @ self.p_X.T
 
         # p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
 
@@ -238,6 +261,24 @@ class Parallel_Layer:
 
         self.dL_dW = p_dL_dW
         return p_dL_dh_prev
+    
+        ##### Second pmat version ############################
+        # p_a = pmat.from_numpy(self.a)
+        # p_X = pmat.from_numpy(self.X)
+        # p_dL_dh_next = dL_dh_next
+
+        # p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
+        # assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
+        # p_dL_dW = p_dL_da @ p_X.T
+
+        # # p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
+
+        # p_W_no_bias = self.W.remove_first_column()
+
+        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
+
+        # self.dL_dW = p_dL_dW
+        # return p_dL_dh_prev
 
         # ##### First pmat version #########################################
         # p_a = pmat.from_numpy(self.a)

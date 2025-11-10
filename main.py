@@ -125,20 +125,32 @@ def main():
             # h4 = fc4.forward(h3)  # (10, 100)
 
             # Raw logits, so no activation yet
-            logits = fc4.forward(h3)  
-            
+            logits = fc4.forward(h3) 
+
+
+
+
             # Apply log_softmax
             log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
 
             # Accuracy    
             acc = np.sum(np.argmax(log_probs, axis=1) == Y) / Y.shape[0]
 
+            ############## Pmat version ########
+            # p_logits = pmat.from_numpy(logits) 
+            # p_log_probs = nn.log_softmax(p_logits.T)  # Shape: (batch_size, 10)
+            # p_loss = nn.nll_loss(p_log_probs, Y)
+            # exit()
+
             # Loss
             loss = nn.nll_loss(log_probs, Y)
+   
             
             # Backward pass - start with combined log_softmax + NLL derivative
             dL_dlogits = nn.nll_loss_derivative(log_probs, Y)  # Shape: (batch_size, 10)
             
+
+
 
             # Now backprop through fc4 after linear transformation
             
