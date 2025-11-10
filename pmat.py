@@ -46,7 +46,7 @@ class pmat:
         row_start, row_end = position[0], position[0] + extent[0]
         col_start, col_end = position[1], position[1] + extent[1]
 
-        local = M_pmat.local
+        local = M_pmat.local    # Using full local array here (not just extent)
 
         ########################################################################
         # Set up the shared array
@@ -209,9 +209,18 @@ class pmat:
     def __getitem__(self, idx):
         # val = self.data[idx]
         # return MyArray(val) if isinstance(val, np.ndarray) else val
-
+        # if pmat.grid_comm.rank == 0:
+        #     print(f"index0 ({len(idx[0])})=\n{idx[0]}\n{"*"*50}\nindex1 ({len(idx[0])})=\n{idx[1]}")
+        # exit()
         full = self.get_full()
-        val = full[idx]
+        val = np.atleast_2d(full[idx])
+        # if pmat.grid_comm.rank == 0:
+        #     print(f"val.shape={val.shape}")
+        # exit()
+
+        #####
+        # Todo: Index -> pmat without going through full numpy array (shared memory?)
+        ####
         return pmat.from_numpy(val) if isinstance(val, np.ndarray) else val
 
     def remove_first_column(self):
@@ -221,14 +230,15 @@ class pmat:
         assert self.m > 1, "matrix only has one column"
                 
         n, m = self.shape        
-        local = self.get_local()
-
+        
         coords = pmat.grid_comm.coords
         extent = self.extent[coords[0]][coords[1]]
         position = self.position[coords[0]][coords[1]]
 
         row_start, row_end = position[0], position[0] + extent[0]
         col_start, col_end = position[1], position[1] + extent[1]
+
+        local = self.local[:extent[0], :extent[1]]
 
         # Set up the submatrix
         submat = pmat(n, m - 1)
@@ -535,7 +545,8 @@ class pmat:
         if func is np.ones_like:
             other = args[0]
             if isinstance(other, pmat):
-                return pmat.from_numpy(np.ones((other.n, other.m)))
+                # return pmat.from_numpy(np.ones((other.n, other.m)))
+                return p_ones_like(other, **kwargs)
         elif func is np.max:
             other = args[0]
             if isinstance(other, pmat):
@@ -559,6 +570,75 @@ class pmat:
 
         raise NotImplementedError(f"{func} not implemented for pmat")
     
+
+    def stack_ones_on_top(self: 'pmat') -> 'pmat':
+
+        # row_offset = 1  # add to first row
+        coords = pmat.grid_comm.coords
+        n, m = self.shape        
+        
+        # Set up the extented matrix
+        newmat = pmat(n + 1, m )
+        newmat_extent = newmat.extent[coords[0]][coords[1]]
+        newmat_position = newmat.position[coords[0]][coords[1]]
+
+        newmat_row_start, newmat_row_end = newmat_position[0], newmat_position[0] + newmat_extent[0]
+        newmat_col_start, newmat_col_end = newmat_position[1], newmat_position[1] + newmat_extent[1]
+
+        newmat_local = newmat.local
+
+        ########################################################################
+        # Write each rank's local block to the shared array offset by one row
+        ########################################################################
+        extent = self.extent[coords[0]][coords[1]]
+        position = self.position[coords[0]][coords[1]]
+
+        row_start, row_end = position[0] + 1, position[0] + extent[0] + 1
+        col_start, col_end = position[1], position[1] + extent[1]
+
+        local = self.local[:extent[0], :extent[1]]
+        
+        type = self.local.dtype
+        type_bytes = np.dtype(type).itemsize
+        shape = (n + 1, m)
+        size = int(np.prod(shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=shape)
+
+        shared_array[0,:] = 1  # First row of ones
+        
+        ############################################################################
+        # Start an epoch and synchronize processes before writing
+        ########################################################################### 
+        win.Fence()
+        
+        # Each rank writes its original matrix block to the shared array
+        shared_array[row_start:row_end, col_start:col_end] = local
+
+        ############################################################################
+        # End the epoch and synchronize processes (again) before reading
+        ############################################################################
+        win.Fence()
+        
+        # Each rank reads its submatrix block from the shared array
+        newmat_local[:newmat_extent[0], :newmat_extent[1]] = shared_array[newmat_row_start:newmat_row_end, newmat_col_start:newmat_col_end]
+        newmat.local = newmat_local
+        
+        ############################################################################
+        # End the epoch and synchronize processes
+        ############################################################################
+        win.Fence()
+
+        # Free the shared memory
+        win.free()
+
+        return newmat
 
 # ANSI color helpers
 def set_text_color(code):
@@ -625,6 +705,18 @@ def print_matrix(my_list, name=""):
                 print(f"{my_list[i][j]}", end=" ")
         print()
     print()
+
+
+def p_ones_like(M_pmat: pmat) -> pmat:
+    newmat = pmat(M_pmat.n, M_pmat.m)
+
+    coords = pmat.grid_comm.coords
+    extent = newmat.extent[coords[0]][coords[1]]
+
+    newmat.local[:extent[0], :extent[1]] = np.ones((extent[0], extent[1]))
+
+    return newmat
+
 
 
 ############################################################################

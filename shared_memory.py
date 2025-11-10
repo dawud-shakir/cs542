@@ -49,6 +49,104 @@ from pmat import pmat, create_grid_comm, print_matrix
 def make_text_green(text):
     return f"\033[38;5;22m{text}\033[0m"
 
+##############################################################################
+
+def stack_ones_on_top(M: pmat) -> pmat:
+
+    # row_offset = 1  # add to first row
+    coords = pmat.grid_comm.coords
+    n, m = M.shape        
+    
+    # Set up the extented matrix
+    newmat = pmat(n + 1, m )
+    newmat_extent = newmat.extent[coords[0]][coords[1]]
+    newmat_position = newmat.position[coords[0]][coords[1]]
+
+    newmat_row_start, newmat_row_end = newmat_position[0], newmat_position[0] + newmat_extent[0]
+    newmat_col_start, newmat_col_end = newmat_position[1], newmat_position[1] + newmat_extent[1]
+
+    newmat_local = newmat.local
+
+    ########################################################################
+    # Write each rank's local block to the shared array offset by one row
+    ########################################################################
+    extent = M.extent[coords[0]][coords[1]]
+    position = M.position[coords[0]][coords[1]]
+
+    row_start, row_end = position[0] + 1, position[0] + extent[0] + 1
+    col_start, col_end = position[1], position[1] + extent[1]
+
+    local = M.local[:extent[0], :extent[1]]
+    
+    type = M.local.dtype
+    type_bytes = np.dtype(type).itemsize
+    shape = (n + 1, m)
+    size = int(np.prod(shape)) * type_bytes
+
+    win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+    assert win is not None, "win is None"
+        
+    # Buffer is allocated by rank 0, but all processes can access it
+    buf, _ = win.Shared_query(0)
+    shared_array = np.ndarray(buffer=buf, dtype=type, shape=shape)
+
+    shared_array[0,:] = 1  # First row of ones
+    
+    ############################################################################
+    # Start an epoch and synchronize processes before writing
+    ########################################################################### 
+    win.Fence()
+    
+    # Each rank writes its original matrix block to the shared array
+    shared_array[row_start:row_end, col_start:col_end] = local
+
+    ############################################################################
+    # End the epoch and synchronize processes (again) before reading
+    ############################################################################
+    win.Fence()
+    
+    # Each rank reads its submatrix block from the shared array
+    newmat_local[:newmat_extent[0], :newmat_extent[1]] = shared_array[newmat_row_start:newmat_row_end, newmat_col_start:newmat_col_end]
+    newmat.local = newmat_local
+    
+    ############################################################################
+    # End the epoch and synchronize processes
+    ############################################################################
+    win.Fence()
+
+    # Free the shared memory
+    win.free()
+
+    return newmat
+
+
+
+def test_pmat_shared_memory_stack_ones_on_top(n, m):
+    A_numpy = np.arange(1, n * m + 1).reshape(n, m).astype(np.double)
+    A_pmat = pmat.from_numpy(A_numpy)
+    A_pmat_newmat = stack_ones_on_top(A_pmat)
+
+
+    numpy_ones = np.ones((1, m)) 
+    A_numpy_newmat = np.vstack([numpy_ones, A_numpy])
+
+    if not np.allclose(A_pmat_newmat.get_full(), A_numpy_newmat):
+        raise ValueError(f"\033[38;5;22m n={n}, m={m}: submat does not match! \033[0m")
+    else:
+        if rank == 0:
+            test_name = f"{test_pmat_shared_memory_stack_ones_on_top.__name__} n={n}, m={m}"
+            print(f"{test_name:<30} ...\033[31m" + "passed" + "\033[0m")
+
+
+    # if rank == 0:
+    #     print("Shared Array after fencing:")
+    #     print(shared_array)
+
+    # Ensure all ranks have finished before starting the next test
+    MPI.COMM_WORLD.Barrier()
+##############################################################################
+
 def from_numpy(M_numpy: np.ndarray) -> pmat:
     
     n, m = M_numpy.shape       
@@ -68,7 +166,7 @@ def from_numpy(M_numpy: np.ndarray) -> pmat:
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]
 
-    local = M_pmat.local
+    local = M_pmat.local    # Using full local array here (not just extent)
 
     ########################################################################
     # Set up the shared array
@@ -124,7 +222,6 @@ def test_pmat_shared_memory_from_numpy(n, m):
 
     # Ensure all ranks have finished before starting the next test
     MPI.COMM_WORLD.Barrier()
-
 ##############################################################################
 
 def remove_first_column(M: pmat) -> pmat:
@@ -135,7 +232,7 @@ def remove_first_column(M: pmat) -> pmat:
     assert M.m > 1, "matrix only has one column"
             
     n, m = M.shape        
-    local = M.get_local()
+
 
     coords = pmat.grid_comm.coords
     extent = M.extent[coords[0]][coords[1]]
@@ -144,6 +241,8 @@ def remove_first_column(M: pmat) -> pmat:
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]
 
+    local = M.local[:extent[0], :extent[1]]
+    
     # Set up the submatrix
     submat = pmat(n, m - 1)
     submat_extent = submat.extent[coords[0]][coords[1]]
@@ -195,8 +294,6 @@ def remove_first_column(M: pmat) -> pmat:
 
     return submat
 
-##############################################################################
-
 def test_pmat_shared_memory_remove_column(n, m):
     A_numpy = np.arange(1, n * m + 1).reshape(n, m).astype(np.double)
     A_pmat = pmat.from_numpy(A_numpy)
@@ -218,6 +315,7 @@ def test_pmat_shared_memory_remove_column(n, m):
 
     # Ensure all ranks have finished before starting the next test
     MPI.COMM_WORLD.Barrier()
+##############################################################################
 
 def write_pmat_to_shared_memory(M: pmat):
 
@@ -238,7 +336,7 @@ def write_pmat_to_shared_memory(M: pmat):
     #     if rank == p:
     #         print("M.shape=", M.shape)
             
-    local = M.get_local()
+
 
     coords = pmat.grid_comm.coords
     extent = M.extent[coords[0]][coords[1]]
@@ -246,7 +344,8 @@ def write_pmat_to_shared_memory(M: pmat):
 
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]
-    
+
+    local = M.local[:extent[0], :extent[1]]
     # shared_shape = (row_end - row_start, col_end - col_start)
     
     
@@ -286,6 +385,7 @@ def test_pmat_shared_memory_with_fencing(n, m):
     #     print(shared_array)
 
     free_shared_memory_array(shared_mem)
+##############################################################################
 
 # Example usage:
 if __name__ == "__main__":
@@ -332,6 +432,34 @@ if __name__ == "__main__":
     if rank == 0:
         print(f"grid size: {grid.dims[0]} x {grid.dims[1]}")
 
+    ##############################################################################
+    # Test stacking ones on top of pmat using shared memory
+    ##############################################################################
+    n, m = 9, 5
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+
+    n, m = 8, 8
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+
+    n, m = 16, 12
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+
+    n, m = 64, 10
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+
+    n, m = 65, 10
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+
+    n, m = 28*28, 1000
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+
+    n, m = 64, 100
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+    
+    n, m = 10, 100
+    test_pmat_shared_memory_stack_ones_on_top(n, m)
+
+    exit()
 
     ##############################################################################
     # Test creating pmat from numpy using shared memory
@@ -351,10 +479,8 @@ if __name__ == "__main__":
     n, m = 65, 10
     test_pmat_shared_memory_from_numpy(n, m)
 
-
     n, m = 28*28, 1000
     test_pmat_shared_memory_from_numpy(n, m)
-    exit()
 
     ##############################################################################
     # Test removing first column from pmat using shared memory
