@@ -15,12 +15,13 @@ def ReLU_derivative(z): return (z > 0).astype(float)    # (out, batch)
 def linear(z): return z                             # (features, batch)
 def linear_derivative(z): return np.ones_like(z)    # (features, batch)
 
-def mean_squared_error(y, y_hat):
-    return np.mean((y_hat - y) ** 2)
+# Not used directly right now
+# def mean_squared_error(y, y_hat):
+#     return np.mean((y_hat - y) ** 2)
 
-def mean_squared_error_derivative(y, y_hat):
-    # d/dy_hat of MSE with mean over all elements
-    return (2.0 / y.size) * (y_hat - y)
+# def mean_squared_error_derivative(y, y_hat):
+#     # d/dy_hat of MSE with mean over all elements
+#     return (2.0 / y.size) * (y_hat - y)
 
 def log_softmax(z):
     """
@@ -62,6 +63,8 @@ class Parallel_Layer:
         
         self.in_features = input_size
          
+        
+
         self.W = pmat(n=output_size, m=input_size+1) # +1 for bias 
 
 
@@ -73,8 +76,19 @@ class Parallel_Layer:
         # Bias column: Uniform(-1/sqrt(fan_in), +1/sqrt(fan_in))
         bias_bound = 1.0 / np.sqrt(input_size)
 
-        # Only W[:,0] has bias column
+        # W = np.random.uniform(-weight_bound, weight_bound, size=(output_size, input_size))
+        # bias = np.random.uniform(-bias_bound, bias_bound, size=(output_size, 1))
+
+        # W = np.hstack([bias, W]) # (out, in+1)
+
+        # self.W = pmat.from_numpy(W)
+
+        ############################################################
+        # Initialize local blocks directly
+        ############################################################
+
         if self.W.coords[1] == 0:
+            # Only blocks with the first column have a bias column
             weight_local = np.random.uniform(-weight_bound, weight_bound, size=(self.W.n_loc, self.W.m_loc-1))
             
             bias_local = np.random.uniform(-bias_bound, bias_bound, size=(self.W.n_loc, 1))
@@ -82,22 +96,13 @@ class Parallel_Layer:
             local = np.hstack([bias_local, weight_local])
 
         else:
+            # Every other block has no bias column
             local = np.random.uniform(-weight_bound, weight_bound, size=(self.W.n_loc, self.W.m_loc))
 
 
-        
-
-
-
-        # print(f"global shape = {self.W.shape}")
-
-        # print(f"local coord = {self.W.coords}")
-        # print(f"local shape = {self.W.local.shape}")
-        # print(f"local padding = {(self.W.n_pad, self.W.m_pad)}")
-
-        # Concatenate bias and weights horizontally
         self.W._set_local(local) # (out, in+1)
-        # exit()
+
+        ############################################################
 
         # # Weights: Uniform initialization (Xavier)
         # weight_bound = np.sqrt(6.0 / (input_size + output_size))
@@ -137,6 +142,7 @@ class Parallel_Layer:
         self.t = 0
 
     def _as_2d(self, p_X):
+
         # Enforce (in, batch); transpose only if it exactly matches (batch, in)
         if p_X.shape[0] != self.in_features:
             if p_X.ndim == 2 and p_X.shape[1] == self.in_features:
@@ -169,6 +175,7 @@ class Parallel_Layer:
 
        
     def forward(self, X_no_bias):
+        ### Fourth pmat version ############################
         p_X_no_bias = pmat.from_numpy(X_no_bias) if not isinstance(X_no_bias, pmat) else X_no_bias
 
         
@@ -179,15 +186,33 @@ class Parallel_Layer:
         self.p_X = self._with_bias(p_X_no_bias) # (in+1, batch)
 
         # (out, batch)
-        p_a = self.W @ self.p_X
-        p_h = self.phi(p_a)
+        self.p_a = self.W @ self.p_X
+        self.p_h = self.phi(self.p_a)
 
         assert self.W.shape[1] == self.p_X.shape[0], (self.W.shape, self.p_X.shape)
 
-        self.a = p_a.get_full()  # (out, batch)
-        self.h = p_h.get_full()  # (out, batch)
+        return self.p_h
 
-        return self.h
+        ### Third pmat version ############################
+        # p_X_no_bias = pmat.from_numpy(X_no_bias) if not isinstance(X_no_bias, pmat) else X_no_bias
+
+        
+        # ######
+        # # Since X_no_bias is the activation of a previous layer, which has no 
+        # # bias row, we need to add it here
+        # p_X_no_bias = self._as_2d(p_X_no_bias)   # (in, batch)
+        # self.p_X = self._with_bias(p_X_no_bias) # (in+1, batch)
+
+        # # (out, batch)
+        # p_a = self.W @ self.p_X
+        # p_h = self.phi(p_a)
+
+        # assert self.W.shape[1] == self.p_X.shape[0], (self.W.shape, self.p_X.shape)
+
+        # self.a = p_a.get_full()  # (out, batch)
+        # self.h = p_h.get_full()  # (out, batch)
+
+        # return self.h
 
         #### Second pmat version ############################
         # ######
@@ -246,14 +271,12 @@ class Parallel_Layer:
         # return self.h
 
     def backward(self, dL_dh_next):
-        p_a = pmat.from_numpy(self.a)
+        ### Fourth pmat version ############################
         p_dL_dh_next = dL_dh_next
 
-        p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
-        assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
+        p_dL_da = p_dL_dh_next * self.phi_prime(self.p_a)
+        assert p_dL_da.shape == self.p_a.shape, (p_dL_da.shape, self.p_a.shape)
         p_dL_dW = p_dL_da @ self.p_X.T
-
-        # p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
 
         p_W_no_bias = self.W.remove_first_column()
 
@@ -261,6 +284,21 @@ class Parallel_Layer:
 
         self.dL_dW = p_dL_dW
         return p_dL_dh_prev
+
+        ### Third pmat version ############################
+        # p_a = pmat.from_numpy(self.a)
+        # p_dL_dh_next = dL_dh_next
+
+        # p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
+        # assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
+        # p_dL_dW = p_dL_da @ self.p_X.T
+
+        # p_W_no_bias = self.W.remove_first_column()
+
+        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
+
+        # self.dL_dW = p_dL_dW
+        # return p_dL_dh_prev
     
         ##### Second pmat version ############################
         # p_a = pmat.from_numpy(self.a)

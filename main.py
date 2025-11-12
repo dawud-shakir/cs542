@@ -3,6 +3,7 @@ main.py
 """
 
 import numpy as np
+from torch import logit
 np.random.seed(0)  # Reproducibility
 import layer as nn
 
@@ -90,6 +91,12 @@ def evaluate():
     h3 = fc3.forward(h2)  # (10, 100)
     logits = fc4.forward(h3)  # Raw logits, no activation yet
 
+    ######### patmat version ##########
+    # Apply log_softmax manually
+    # p_log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
+    # y_hat = np.argmax(p_log_probs.get_full(), axis=1)  # Predicted class labels
+
+    ####### Original version ##########
     # Apply log_softmax manually
     log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
     y_hat = np.argmax(log_probs, axis=1)  # Predicted class labels
@@ -97,7 +104,8 @@ def evaluate():
     return np.sum(y_hat == y_test) / y_test.shape[0]
 
 def main():
-    print(f"### Initial test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
+    ####### Original version ##########    
+    # print(f"### Initial test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
 
     """ Training """
     n_batches = X_train.shape[0] // batch_size
@@ -125,28 +133,31 @@ def main():
             # h4 = fc4.forward(h3)  # (10, 100)
 
             # Raw logits, so no activation yet
-            logits = fc4.forward(h3) 
+            p_logits = fc4.forward(h3) 
 
+            ####################################################################
+            # Apply log_softmax and NLL loss
+            ####################################################################
 
-
-
-            # Apply log_softmax
+            ######### patmat version ##########
+            # p_log_probs = nn.log_softmax(p_logits.T)  # Shape: (batch_size, 10)
+            # p_loss = nn.nll_loss(p_log_probs, Y)
+            
+            ####### Original version ##########
+            logits = p_logits.get_full()
             log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
 
             # Accuracy    
             acc = np.sum(np.argmax(log_probs, axis=1) == Y) / Y.shape[0]
 
-            ############## Pmat version ########
-            # p_logits = pmat.from_numpy(logits) 
-            # p_log_probs = nn.log_softmax(p_logits.T)  # Shape: (batch_size, 10)
-            # p_loss = nn.nll_loss(p_log_probs, Y)
-            # exit()
-
             # Loss
             loss = nn.nll_loss(log_probs, Y)
-   
             
+            ####################################################################
             # Backward pass - start with combined log_softmax + NLL derivative
+            ####################################################################
+
+            ####### Original version ##########
             dL_dlogits = nn.nll_loss_derivative(log_probs, Y)  # Shape: (batch_size, 10)
             
 
@@ -154,7 +165,7 @@ def main():
 
             # Now backprop through fc4 after linear transformation
             
-            
+        
             # Make fc4 linear since we applied log_softmax here
             p_dL_dlogits = pmat.from_numpy(dL_dlogits) 
 
