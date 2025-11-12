@@ -17,6 +17,38 @@ def create_grid_comm():
     periods = [True, True]
     return comm.Create_cart(dims, periods, reorder=True)
 
+def print_matrix(my_list, name=""):
+    rows = len(my_list)
+    cols = len(my_list[0])
+    if name != "":
+        print(f"{name}:")
+    for i in range(rows):
+        for j in range(cols):
+            if pmat.grid_comm.rank == 0:
+                print(f"{my_list[i][j]}", end=" ")
+        print()
+    print()
+
+def print_pmat_on_rank0(M: 'pmat', msg=""):
+    comm = M.grid_comm
+    rank = comm.Get_rank()
+
+    s = str(M)
+    if rank == 0:
+        # msg = msg + ":" if len(msg) > 0 else msg
+        print(f"{msg}\n{s}\n")
+
+# ANSI color helpers
+def set_text_color(code):
+    # code is an integer (e.g. 31 for red, 0 to reset)
+    print(f"\033[{code}m", end="", flush=True)
+
+def reset_text_color():
+    print("\033[0m", end="", flush=True)
+
+################################################################################
+# Class pmat (will probably be called p_matrix later)
+################################################################################
 
 class pmat:
     ############################################################################
@@ -121,6 +153,52 @@ class pmat:
 
         return new_M
 
+    def print_pretty(self, name="", remove_padding=True):
+        # print("p_rows, p_cols:", p_rows, p_cols)
+        # print("n, m:", n, m)
+        # print("n_local, n_rem:", n_local, n_rem)
+        # print("m_local, m_rem:", m_local, m_rem)
+
+        if name != "":
+            if self.grid_comm.rank == 0:
+                print(f"{name}:")
+
+        full_matrix = self.get_full(remove_padding)
+                    
+        for row in range(self.n):
+            col = 0
+
+            if row % self.n_loc == 0:
+                row_color = (row * self.m) // self.n_loc
+            while col < self.m:
+                color_code = 31 + ((row_color + col))   # 7 possible colors
+                # print(f"row {row} col {j} color {color_code}", flush=True)
+
+                block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + self.m_loc])
+                
+                if self.grid_comm.rank == 0:
+                    Pr = row // self.n_loc
+                    Pc = col // self.m_loc
+                    # color_code = 31 + (Pr + Pc) % 7  # 7 possible colors
+                    # set_text_color(color_code)
+                    palette = [196, 202, 208, 214, 220, 226, 82, 46, 21, 51, 93, 129, 201, 200, 199, 198]
+                    color_code = palette[(Pr + Pc * self.grid_comm.dims[1]) % len(palette)]
+                    print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+                    
+                    # color_code = (Pr * pmatrix.grid_comm.dims[1] + Pc) * 13 % 256
+                    # print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+                    
+                    # print(block_str, end=" ", flush=True)
+                    # reset_text_color()
+        
+                col += self.m_loc
+
+            # New line after each global row
+            if self.grid_comm.rank == 0:
+                print() 
+        
+        pmat.grid_comm.Barrier()
+
 
     ############################################################################
     # Constructor
@@ -148,7 +226,18 @@ class pmat:
         _, self.m_pad = divmod(self.m, Pc)
         self.is_padded = (self.n_pad > 0) or (self.m_pad > 0)
 
-        self._set_local(local)
+        ########### Also in method self._set_local(local) ##################
+
+        # Local block will be (n_pad, m_pad) larger than local if there is zero padding.
+        self.local = np.zeros((self.n_loc, self.m_loc), dtype=np.double)
+        self.local = np.ascontiguousarray(self.local)
+        
+        if local is not None:
+            local = np.atleast_2d(local)
+            if n==1 and m==1:
+                print(f"local.shape={local.shape}")
+                print(f"self.local.shape={self.local.shape}")
+            self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
 
         
         ####################### New Way (with extents) ########################
@@ -506,14 +595,17 @@ class pmat:
     # Universal functions (np.exp, np.add, etc.)
     ############################################################################
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        local_safe = self.local.copy()
+        extent = self.extent[self.coords[0]][self.coords[1]]
+        local = self.local[:extent[0], :extent[1]]
 
-        if ufunc is np.log:
-            eps = 1e-12
-            local_safe = np.where(self.local == 0, eps, self.local)
+
+
+        # if ufunc is np.log:
+        #     eps = 1e-12
+        #     local = np.where(self.local == 0, eps, self.local)
         
-        # Convert inputs to numpy arrays
-        arrays = [np.asarray(local_safe) if isinstance(x, pmat) else x
+        # # Convert inputs to numpy arrays
+        arrays = [np.asarray(local) if isinstance(x, pmat) else x
                   for x in inputs]
 
         with warnings.catch_warnings(record=True) as w:
@@ -521,8 +613,9 @@ class pmat:
 
         for warning in w:
             if issubclass(warning.category, RuntimeWarning):
-
-                print(f"\033[91m{pmat.grid_comm.coords}: Caught a RuntimeWarning during training: {warning.message}\033[0m")
+                
+                local_str = f"\nOriginal local:\n{self.local}\n\nResult matrix:\n{result}"
+                print(f"\033[91m{pmat.grid_comm.coords}: Caught a RuntimeWarning: {warning.message}\033[0m")
                 # pmat.grid_comm.Abort(-1)
 
         
@@ -550,25 +643,100 @@ class pmat:
         elif func is np.max:
             other = args[0]
             if isinstance(other, pmat):
-                return pmax(other, **kwargs)
-        elif func is np.maximum:
-            a1, a2 = args[0], args[1]
-            if isinstance(a1, pmat) and not isinstance(a2, pmat):
-                return pmaximum(a2, a1, **kwargs)
-            elif not isinstance(a1, pmat) and isinstance(a2, pmat):
-                return pmaximum(a1, a2, **kwargs)
-            elif isinstance(a1, pmat) and isinstance(a2, pmat):
-                return NotImplemented
+                return self.pmax(other, **kwargs)
         elif func is np.sum:
             other = args[0]
             if isinstance(other, pmat):
-                return psum(other, **kwargs)
+                return self.psum(other, **kwargs)
         elif func is np.mean:
             other = args[0]
             if isinstance(other, pmat):
-                return pmean(other, **kwargs)
+                return self.pmean(other, **kwargs)
+        elif func is np.maximum:
+            other = args[0]
+            if isinstance(other, self.local.dtype):     # scalar
+                return self.pmaximum(other, **kwargs)
 
         raise NotImplementedError(f"{func} not implemented for pmat")
+    
+    ############################################################################
+    # Non-ufunc pmat functions (sum, mean, max, maximum, etc.)
+    ############################################################################
+
+    def psum(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+
+        if axis == 1:
+            horz_group = self.grid_comm.Sub([False, True])  # rows
+            row_sum = []
+
+            for row in range(self.n_loc):
+                # Reduce to the root of each group
+                row_sum.append(horz_group.reduce(np.sum(self.local[row, :]), op=MPI.SUM, root=0))
+
+            if self.grid_comm.coords[1] == 0:
+                row_sum = np.array([x for x in row_sum if x is not np.nan]).flatten().reshape(-1, 1) # maxs is now a column vector
+            else:
+                row_sum = None
+
+            return pmat(self.n, 1, row_sum)
+
+    def pmax(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+
+        if axis == 1:
+            horz_group = self.grid_comm.Sub([False, True])  # rows
+            row_max = []
+
+            for row in range(self.n_loc):
+                # Reduce to the root of each group
+                row_max.append(horz_group.reduce(np.max(self.local[row, :]), op=MPI.MAX, root=0))
+
+            if self.grid_comm.coords[1] == 0:
+                row_max = np.array([x for x in row_max if x is not np.nan]).flatten().reshape(-1, 1) # maxs is now a column vector
+            else:
+                row_max = None
+
+            return pmat(self.n, 1, row_max)
+
+    def pmean(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        if axis == 0:
+            raise NotImplementedError("pmean axis=0 not implemented yet")
+        elif axis == 1:
+            horz_group = self.grid_comm.Sub([False, True])  # rows
+            row_reduction = []
+
+            for row in range(self.n_loc):
+                # Reduce to the root of each group
+                row_reduction.append(horz_group.reduce(np.sum(self.local[row, :]), op=MPI.SUM, root=0))
+
+            if self.grid_comm.coords[1] == 0:
+                # Remove Nones and make a column vector
+                row_reduction = np.array([x for x in row_reduction if x is not np.nan]).flatten().reshape(-1, 1)
+                
+                # Divide by total number of columns
+                row_reduction = row_reduction / self.m
+            else:
+                # Process is not a root
+                row_reduction = None
+
+            return pmat(self.n, 1, row_reduction)
+        elif axis is None:
+            # Global mean
+            total_sum = self.grid_comm.allreduce(np.sum(self.local), op=MPI.SUM)
+            global_mean = total_sum / (self.n * self.m)
+            return global_mean      # return scalar value (not pmat)
+        else:
+            raise ValueError(f"Invalid axis {axis} for pmean")
+        
+    def pmaximum(self, scalar, *args, **kwargs):
+        return pmat(self.n, self.m, np.maximum(scalar, self.local, *args, **kwargs))
     
 
     def stack_ones_on_top(self: 'pmat') -> 'pmat':
@@ -640,72 +808,12 @@ class pmat:
 
         return newmat
 
-# ANSI color helpers
-def set_text_color(code):
-    # code is an integer (e.g. 31 for red, 0 to reset)
-    print(f"\033[{code}m", end="", flush=True)
 
-def reset_text_color():
-    print("\033[0m", end="", flush=True)
 
-def print_pretty(pmatrix, name="", remove_padding=True):
-        # print("p_rows, p_cols:", p_rows, p_cols)
-        # print("n, m:", n, m)
-        # print("n_local, n_rem:", n_local, n_rem)
-        # print("m_local, m_rem:", m_local, m_rem)
 
-        if name != "":
-            if pmatrix.grid_comm.rank == 0:
-                print(f"{name}:")
-
-        full_matrix = pmatrix.get_full(remove_padding)
-                    
-        for row in range(pmatrix.n):
-            col = 0
-
-            if row % pmatrix.n_loc == 0:
-                row_color = (row * pmatrix.m) // pmatrix.n_loc
-            while col < pmatrix.m:
-                color_code = 31 + ((row_color + col))   # 7 possible colors
-                # print(f"row {row} col {j} color {color_code}", flush=True)
-
-                block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + pmatrix.m_loc])
-                
-                if pmatrix.grid_comm.rank == 0:
-                    Pr = row // pmatrix.n_loc
-                    Pc = col // pmatrix.m_loc
-                    # color_code = 31 + (Pr + Pc) % 7  # 7 possible colors
-                    # set_text_color(color_code)
-                    palette = [196, 202, 208, 214, 220, 226, 82, 46, 21, 51, 93, 129, 201, 200, 199, 198]
-                    color_code = palette[(Pr + Pc * pmatrix.grid_comm.dims[1]) % len(palette)]
-                    print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
-                    
-                    # color_code = (Pr * pmatrix.grid_comm.dims[1] + Pc) * 13 % 256
-                    # print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
-                    
-                    # print(block_str, end=" ", flush=True)
-                    # reset_text_color()
-        
-                col += pmatrix.m_loc
-
-            # New line after each global row
-            if pmatrix.grid_comm.rank == 0:
-                print() 
-        
-        pmat.grid_comm.Barrier()
-
-def print_matrix(my_list, name=""):
-    rows = len(my_list)
-    cols = len(my_list[0])
-    if name != "":
-        print(f"{name}:")
-    for i in range(rows):
-        for j in range(cols):
-            if pmat.grid_comm.rank == 0:
-                print(f"{my_list[i][j]}", end=" ")
-        print()
-    print()
-
+############################################################################
+# Utility functions
+############################################################################
 
 def p_ones_like(M_pmat: pmat) -> pmat:
     newmat = pmat(M_pmat.n, M_pmat.m)
@@ -763,210 +871,6 @@ def matmul(A: pmat, B: pmat):
     return pmat(A.n, B.m, local=C)
 
 
-############################################################################
-# Non-ufunc pmat functions (sum, mean, max, maximum, etc.)
-############################################################################
-
-def psum(M: pmat, *args, **kwargs):
-    axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
-
-    assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
-
-    if axis == 1:
-        horz_group = M.grid_comm.Sub([False, True])  # rows
-        row_sum = []
-
-        for row in range(M.n_loc):
-            # Reduce to the root of each group
-            row_sum.append(horz_group.reduce(np.sum(M.local[row, :]), op=MPI.SUM, root=0))
-
-        if M.grid_comm.coords[1] == 0:
-            row_sum = np.array([x for x in row_sum if x is not np.nan]).flatten().reshape(-1, 1) # maxs is now a column vector
-        else:
-            row_sum = None
-
-        return pmat(M.n, 1, row_sum)
-
-def pmax(M: pmat, *args, **kwargs):
-    axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
-
-    assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
-
-    if axis == 1:
-        horz_group = M.grid_comm.Sub([False, True])  # rows
-        row_max = []
-
-        for row in range(M.n_loc):
-            # Reduce to the root of each group
-            row_max.append(horz_group.reduce(np.max(M.local[row, :]), op=MPI.MAX, root=0))
-
-        if M.grid_comm.coords[1] == 0:
-            row_max = np.array([x for x in row_max if x is not np.nan]).flatten().reshape(-1, 1) # maxs is now a column vector
-        else:
-            row_max = None
-
-        return pmat(M.n, 1, row_max)
-
-def pmean(M: pmat, *args, **kwargs):
-    axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
-
-    assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
-
-    if axis == 1:
-        horz_group = M.grid_comm.Sub([False, True])  # rows
-        row_reduction = []
-
-        for row in range(M.n_loc):
-            # Reduce to the root of each group
-            row_reduction.append(horz_group.reduce(np.sum(M.local[row, :]), op=MPI.SUM, root=0))
-
-        if M.grid_comm.coords[1] == 0:
-            # Remove Nones and make a column vector
-            row_reduction = np.array([x for x in row_reduction if x is not np.nan]).flatten().reshape(-1, 1)
-            
-            # Divide by total number of columns
-            row_reduction = row_reduction / M.m
-        else:
-            # Process is not a root
-            row_reduction = None
-
-        return pmat(M.n, 1, row_reduction)
-    
-def pmaximum(scalar, M: pmat, *args, **kwargs):
-    return pmat(M.n, M.m, np.maximum(scalar, M.local, *args, **kwargs))
-
-def print_pmat_on_rank0(M: pmat, msg=""):
-    comm = M.grid_comm
-    rank = comm.Get_rank()
-
-    s = str(M)
-    if rank == 0:
-        # msg = msg + ":" if len(msg) > 0 else msg
-        print(f"{msg}\n{s}\n")
-
-def test(n, k, m, dtype=np.double):
-    
-    
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    num_procs = comm.Get_size()
-
-
-
-    # Process grid and panel width
-    Pr = int(np.sqrt(num_procs))
-    Pc = int(np.sqrt(num_procs))
-
-    dims = [Pr, Pc]
-    periods = [True, True]
-    grid_comm = comm.Create_cart(dims, periods, reorder=True)
-
-
-    def check(M1: pmat, M2: np.ndarray, str=""):
-        pmat_as_numpy = M1.get_full()
-        if rank == 0:
-            assert isinstance(M1, pmat) and isinstance(M2, np.ndarray), f"{str} failed instance check\ntype(M1)={type(M1)} and type(M2)={type(M2)}"
-            
-            assert np.allclose(pmat_as_numpy, M2), f"{str} failed allclose\nM1:\n{pmat_as_numpy}\nM2:\n{M2}"
-
-            # assert M1_pmat.dtype == M2.dtype, f"{str} failed type check\ndtype(M1)={M1_pmat.dtype} and dtype(M2)={M2.dtype}"
-            
-            print(f"\t{str:<20}...\033[31mpassed\033[0m allclose")
-
-    ################################################################
-    # Start tests
-    ################################################################
-
-    if rank == 0:           
-        print(f"Testing n={n}, k={k}, m={m}...")
-    
-    A_mat = np.arange(1, n * k + 1).reshape(n, k).astype(dtype)
-    B_mat = np.arange(1, k * m + 1).reshape(k, m).astype(dtype)
-    D_mat = np.arange(1, m * n + 1).reshape(m, n).astype(dtype)
-
-    A = pmat.from_numpy(A_mat)
-
-    ################################################################
-    # Non-Element-wise operations
-
-    # Initial matrix
-    check(A, A_mat, "A")
-
-    # Transpose
-    check(A.T, A_mat.T, "A.T")
-
-    # Negation
-    check(-A, -A_mat, "-A")
-    
-    # Matrix Multiply
-    B = pmat.from_numpy(B_mat)
-    check(A @ B, A_mat @ B_mat, "A @ B")
-
-    D = pmat.from_numpy(D_mat)
-    check(A @ B @ D, A_mat @ B_mat @ D_mat, "A @ B @ D")
-
-    ################################################################
-    # Element-wise operations
-
-    # Addition
-    check(A + A, A_mat + A_mat, "A + A")
-
-    # Subtraction
-    check(A - A, A_mat - A_mat, "A - A")
-
-    # Multiplication
-    check(A * A, A_mat * A_mat, "A * A")
-
-    ################################################################
-    # Function operations
-
-    # Maximum
-    check(pmaximum(32, A), np.maximum(32, A_mat), "maxmium(32, A)")
-
-    pmean_result = pmean(A, axis=1)
-    if pmean_result is not None:
-        check(pmean_result, np.mean(A_mat, axis=1, keepdims=True), "mean(A, axis=1)")
-
-    pmax_result = pmax(A, axis=1)
-    if pmax_result is not None:
-        check(pmax_result, np.max(A_mat, axis=1, keepdims=True), "max(A, axis=1)")
-
-    check(np.log(A), np.log(A_mat), "log(A)")
-
-    check(A > 5, A_mat > 5, "A > 5")
-    ################################################################
-    # Vecmat and Matvec operation 
-    
-    # Row vector = n...1
-    row_vec = np.array(np.arange(n+1, 1, -1), ndmin=2).reshape(1, -1)
-    row_pvec = pmat.from_numpy(row_vec)
-    check(row_pvec @ A, row_vec @ A_mat, "vecmat")
-
-    # Column vector = k...1
-    col_vec = np.array(np.arange(k+1, 1, -1), ndmin=2).reshape(-1, 1) 
-    col_pvec = pmat.from_numpy(col_vec)
-    check(A @ col_pvec, A_mat @ col_vec, "matvec")
-
-    ################################################################
-    # End tests
-    ################################################################
-
-    if rank == 0:
-        A_extent = A.extent
-        B_extent = B.extent
-
-
-        print_matrix(A.extent, name="A extent")
-        print_matrix(B.extent, name="B extent")
-        print()
-        
-    print_pretty(A, "A", remove_padding=False)
-    print_pretty(B, "B", remove_padding=False)
-
-        # for i in range(Pr):
-        #     for j in range(Pc):
-        #         print(f"{A_extent[i][j][1]} {B_extent[j][i][0]}")
-   
 
 
 
