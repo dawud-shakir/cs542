@@ -1,7 +1,7 @@
 from hmac import new
 import warnings
 import numpy as np
-np.set_printoptions(precision=0, suppress=True, floatmode='fixed')
+np.set_printoptions(precision=1, suppress=True, floatmode='fixed')
 
 from mpi4py import MPI
 
@@ -28,6 +28,13 @@ def print_matrix(my_list, name=""):
                 print(f"{my_list[i][j]}", end=" ")
         print()
     print()
+
+def print_ordered_by_rank(x, *args, **kwargs):
+    grid = create_grid_comm()
+    for p in range(grid.Get_size()):
+        grid.Barrier()
+        if p == grid.rank:
+            print(x, *args, **kwargs)
 
 def print_pmat_on_rank0(M: 'pmat', msg=""):
     comm = M.grid_comm
@@ -153,7 +160,7 @@ class pmat:
 
         return new_M
 
-    def print_pretty(self, name="", remove_padding=True):
+    def pretty_string(self, name="", remove_padding=True, as_type="f"):
         # print("p_rows, p_cols:", p_rows, p_cols)
         # print("n, m:", n, m)
         # print("n_local, n_rem:", n_local, n_rem)
@@ -164,8 +171,9 @@ class pmat:
                 print(f"{name}:")
 
         full_matrix = self.get_full(remove_padding)
-                    
-        for row in range(self.n):
+        matrix_str = ""            
+        
+        for row in range(self.n if remove_padding else self.n + self.n_pad):
             col = 0
 
             if row % self.n_loc == 0:
@@ -173,38 +181,48 @@ class pmat:
             while col < self.m:
                 color_code = 31 + ((row_color + col))   # 7 possible colors
                 # print(f"row {row} col {j} color {color_code}", flush=True)
-
-                block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + self.m_loc])
                 
+                if as_type == "i":
+                    block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + self.m_loc])
+                elif as_type == "f" or as_type == "d":
+                    block_str = "\b" + "".join(f"{float(val):10.1f}" for val in full_matrix[row][col : col + self.m_loc])
+                
+
                 if self.grid_comm.rank == 0:
                     Pr = row // self.n_loc
                     Pc = col // self.m_loc
                     # color_code = 31 + (Pr + Pc) % 7  # 7 possible colors
                     # set_text_color(color_code)
-                    palette = [196, 202, 208, 214, 220, 226, 82, 46, 21, 51, 93, 129, 201, 200, 199, 198]
+                    palette = [196, 46, 220, 21, 208, 93, 226, 201, 202, 51, 82, 129, 214, 200, 198, 199]
                     color_code = palette[(Pr + Pc * self.grid_comm.dims[1]) % len(palette)]
-                    print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+
+                    matrix_str += f"\033[38;5;{color_code}m{block_str}\033[0m"
+                    matrix_str += " "
                     
                     # color_code = (Pr * pmatrix.grid_comm.dims[1] + Pc) * 13 % 256
                     # print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
-                    
-                    # print(block_str, end=" ", flush=True)
-                    # reset_text_color()
+
         
                 col += self.m_loc
 
             # New line after each global row
             if self.grid_comm.rank == 0:
-                print() 
+                matrix_str += "\n" 
         
         pmat.grid_comm.Barrier()
+        return matrix_str
 
+    def print_pretty(self, name="", remove_padding=True):
+        matrix_str = self.pretty_string(name, remove_padding)
+        if self.grid_comm.rank == 0:
+            print(matrix_str, flush=True)
 
     ############################################################################
     # Constructor
     ############################################################################
 
     def __init__(self, n, m, local=None):
+    # def __init__(self, shape: tuple[int, int], local=None):
 
         Pr = pmat.grid_comm.dims[0]
         Pc = pmat.grid_comm.dims[1]
@@ -311,6 +329,18 @@ class pmat:
         # Todo: Index -> pmat without going through full numpy array (shared memory?)
         ####
         return pmat.from_numpy(val) if isinstance(val, np.ndarray) else val
+    
+    def __setitem__(self, idx, value):
+        # i, i_rem = divmod(self.n, idx[0]) 
+        # j, j_rem = divmod(self.m, idx[1]) 
+        
+        # if self.coords[0] == i and self.coords[1] == j:
+        #     pass
+        #     # print(f"Setting item on rank {self.rank} at coords {self.coords} for index {idx} with value {value}")
+
+        full = self.get_full()
+        full[idx] = value
+        self.set_full(full)
 
     def remove_first_column(self):
     
@@ -442,59 +472,163 @@ class pmat:
     ############################################################################
     # Arithmetic operators
     ############################################################################
+    def check_for_broadcast(A, B):
+        # Python broadcasting expands a smaller array (a vector) to match a larger array (a matrix)
+
+        # Scalar broadcasting
+        if np.isscalar(B):
+            A_extent = A.extent[A.coords[0]][A.coords[1]]
+            A_local = A.local[:A_extent[0], :A_extent[1]]
+
+            return A_local, B, (A.n, A.m)
+        elif np.isscalar(A):
+            B_extent = B.extent[B.coords[0]][B.coords[1]]
+            B_local = B.local[:B_extent[0], :B_extent[1]]
+
+            return A, B_extent, (B.n, B.m)
+
+        
+        # Operands are without padding
+        A_extent = A.extent[A.coords[0]][A.coords[1]]
+        A_local = A.local[:A_extent[0], :A_extent[1]]
+        
+        B_extent = B.extent[B.coords[0]][B.coords[1]]
+        B_local = B.local[:B_extent[0], :B_extent[1]]
+
+        # Output shape is a matrix
+        output_shape = (max(A.n, B.n), max(A.m, B.m))
+
+        # Column vector broadcasting. Avoid broadcast if A and B are both column vectors
+        if B.shape == (A.n, 1) and B.m != A.m:  
+            # Handle column vector as right operand
+            horz_comm = B.grid_comm.Sub([False, True])            
+            B_local_col = horz_comm.bcast(B_local, root=0)
+            return A_local, B_local_col, output_shape
+        elif A.shape == (B.n, 1) and A.m != B.m:           
+            # Handle column vector as left operand
+            horz_comm = A.grid_comm.Sub([False, True])            
+            A_local_col = horz_comm.bcast(A_local, root=0)
+            return A_local_col, B_local, output_shape
+        
+        # Row vector broadcasting. Avoid broadcast if A and B are both row vectors
+        elif B.shape == (1, A.m) and B.n != A.n:  
+            # Handle row vector as right operand
+            vert_comm = B.grid_comm.Sub([True, False])            
+            B_local_row = vert_comm.bcast(B_local, root=0)
+            return A_local, B_local_row, output_shape
+        elif A.shape == (1, B.m) and A.n != B.n:
+            # Handle row vector as left operand
+            vert_comm = A.grid_comm.Sub([True, False])            
+            A_local_row = vert_comm.bcast(A_local, root=0)
+            return A_local_row, B_local, output_shape
+        
+        # Nevermind: Both are matrices
+        else:
+            return A_local, B_local, output_shape
+
 
     def __gt__(self, other):
-        return pmat(self.n, self.m, self.local > other)
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.greater(left_operand,  right_operand))
+
+        # return pmat(self.n, self.m, self.local > other)
     
     def __add__(self, other):
-        if np.isscalar(other):
-            return pmat(self.n, self.m, self.local + other)
-        else:
-            return pmat(self.n, self.m, self.local + other.local)
-    
-    def __sub__(self, other):        
-        return pmat(self.n, self.m, self.local - other.local)
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, self.local + other)
+        # else:
+            
+        #     
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.add(left_operand,  right_operand))
+        # return pmat(self.n, self.m, self.local + other.local)
+
+
+    def __sub__(self, other):     
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.subtract(left_operand, right_operand))
+
 
     def __mul__(self, other):
-        if np.isscalar(other):
-            return pmat(self.n, self.m, self.local * other)
-        else:
-            return pmat(self.n, self.m, self.local * other.local)
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.multiply(left_operand, right_operand))
+        
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, self.local * other)
+        # else:
+        #     return pmat(self.n, self.m, self.local * other.local)
     
     def __rmul__(self, other):
         # Handle scalar * pmat (right multiplication)
-        if np.isscalar(other):
-            return pmat(self.n, self.m, other * self.local)
-        else:
-            return NotImplemented
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.multiply( right_operand, left_operand))
+        
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, other * self.local)
+        # else:
+        #     return NotImplemented
         
     def __truediv__(self, other):
-        if np.isscalar(other):
-            return pmat(self.n, self.m, self.local / other)
-        else:
-            return pmat(self.n, self.m, self.local / other.local)
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.true_divide(left_operand, right_operand))
+
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, self.local / other)
+        # else:
+        #     return pmat(self.n, self.m, self.local / other.local)
     
     def __rdiv__(self, other):
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.true_divide(left_operand, right_operand))
+
         # Handle scalar / pmat (right division)
-        if np.isscalar(other):
-            return pmat(self.n, self.m, other / self.local)
-        else:
-            return NotImplemented
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, other / self.local)
+        # else:
+        #     return NotImplemented
     
     def __rtruediv__(self, other):
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.true_divide(right_operand, left_operand))
+
         # Handle scalar / pmat (right true division for Python 3)
-        if np.isscalar(other):
-            return pmat(self.n, self.m, other / self.local)
-        else:
-            return NotImplemented
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, other / self.local)
+        # else:
+        #     return NotImplemented
 
     def __radd__(self, other):
-        # Handle scalar + pmat (right addition)
-        if np.isscalar(other):
-            return pmat(self.n, self.m, other + self.local)
-        else:
-            return NotImplemented
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.add(right_operand, left_operand))
+
+        # # Handle scalar + pmat (right addition)
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, other + self.local)
+        # else:
+        #     return NotImplemented
     
+
+    ##### failed in test.py..... ########
+    def __rsub__(self, other):
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.subtract( right_operand, left_operand))
+
+        # # Handle scalar + pmat (right addition)
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, other - self.local)
+        # else:
+        #     return NotImplemented
+
     def __neg__(self):
         return pmat(self.n, self.m, -self.local)
 
@@ -598,13 +732,7 @@ class pmat:
         extent = self.extent[self.coords[0]][self.coords[1]]
         local = self.local[:extent[0], :extent[1]]
 
-
-
-        # if ufunc is np.log:
-        #     eps = 1e-12
-        #     local = np.where(self.local == 0, eps, self.local)
-        
-        # # Convert inputs to numpy arrays
+        # Convert inputs to arrays
         arrays = [np.asarray(local) if isinstance(x, pmat) else x
                   for x in inputs]
 
@@ -634,11 +762,13 @@ class pmat:
         """
         Called for non-ufunc NumPy functions that support the array function protocol.
         """
-
-        if func is np.ones_like:
+        if func is np.zeros_like:
             other = args[0]
             if isinstance(other, pmat):
-                # return pmat.from_numpy(np.ones((other.n, other.m)))
+                return pzeros_like(other, **kwargs)
+        elif func is np.ones_like:
+            other = args[0]
+            if isinstance(other, pmat):
                 return p_ones_like(other, **kwargs)
         elif func is np.max:
             other = args[0]
@@ -814,6 +944,16 @@ class pmat:
 ############################################################################
 # Utility functions
 ############################################################################
+
+def pzeros_like(M_pmat: pmat) -> pmat:
+    newmat = pmat(M_pmat.n, M_pmat.m)
+
+    coords = pmat.grid_comm.coords
+    extent = newmat.extent[coords[0]][coords[1]]
+
+    newmat.local[:extent[0], :extent[1]] = np.zeros((extent[0], extent[1]))
+
+    return newmat
 
 def p_ones_like(M_pmat: pmat) -> pmat:
     newmat = pmat(M_pmat.n, M_pmat.m)
