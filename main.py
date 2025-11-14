@@ -3,8 +3,9 @@ main.py
 """
 
 import numpy as np
-from torch import logit
 np.random.seed(0)  # Reproducibility
+np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
+
 import layer as nn
 
 import os               # for file paths
@@ -104,6 +105,26 @@ def evaluate():
     return np.sum(y_hat == y_test) / y_test.shape[0]
 
 def main():
+
+    # logits_numpy = np.random.uniform(-1.0, 1.0, (5, 5))
+    # logits_pmat = pmat.from_numpy(logits_numpy)
+
+    # softmax_numpy = nn.log_softmax(logits_numpy)
+    # softmax_pmat = nn.log_softmax(logits_pmat)
+    
+    # if not np.allclose(softmax_pmat.get_full(), softmax_numpy):
+    #     softmax_pmat_str = softmax_pmat.pretty_string("f_pmat", remove_padding=False, as_type="f")
+    
+    #     if MPI.COMM_WORLD.Get_rank() == 0:
+    #         print("softmax_numpy", softmax_numpy.shape, ":\n", softmax_numpy)
+    #         print("softmax_pmat", softmax_pmat.shape, ":\n", softmax_pmat_str)
+
+    #         print("\033[32msoftmax_pmat and softmax_numpy failed allclose!\033[0m")
+    # else:
+    #     if MPI.COMM_WORLD.Get_rank() == 0:
+    #         print("softmax(A) ...\033[31mpassed\033[0m allclose")
+    # exit()
+
     ####### Original version ##########    
     # print(f"### Initial test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
 
@@ -140,34 +161,29 @@ def main():
             ####################################################################
 
             ######### patmat version ##########
-            # p_log_probs = nn.log_softmax(p_logits.T)  # Shape: (batch_size, 10)
-            # p_loss = nn.nll_loss(p_log_probs, Y)
-            
+            p_log_probs = nn.log_softmax(p_logits.T)  # Shape: (batch_size, 10)
+
+            acc = np.sum(np.argmax(p_log_probs.get_full(), axis=1) == Y) / Y.shape[0]
+            loss = nn.nll_loss(p_log_probs.get_full(), Y)
+
+
             ####### Original version ##########
-            logits = p_logits.get_full()
-            log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
+            # logits = p_logits.get_full()
+            # log_probs = nn.log_softmax(logits.T)      # (batch_size, 10)
 
-            # Accuracy    
-            acc = np.sum(np.argmax(log_probs, axis=1) == Y) / Y.shape[0]
-
-            # Loss
-            loss = nn.nll_loss(log_probs, Y)
+            # acc = np.sum(np.argmax(log_probs, axis=1) == Y) / Y.shape[0]
+            # loss = nn.nll_loss(log_probs, Y)
             
             ####################################################################
             # Backward pass - start with combined log_softmax + NLL derivative
             ####################################################################
 
+            ######### patmat version ##########
+            p_dL_dlogits = nn.nll_loss_derivative(p_log_probs, Y)  # (batch_size, 10)
+            
             ####### Original version ##########
-            dL_dlogits = nn.nll_loss_derivative(log_probs, Y)  # Shape: (batch_size, 10)
-            
-
-
-
-            # Now backprop through fc4 after linear transformation
-            
-        
-            # Make fc4 linear since we applied log_softmax here
-            p_dL_dlogits = pmat.from_numpy(dL_dlogits) 
+            # dL_dlogits = nn.nll_loss_derivative(log_probs, Y)  # (batch_size, 10)
+            # p_dL_dlogits = pmat.from_numpy(dL_dlogits) 
 
             fc4.phi = nn.linear  
             fc4.phi_prime = nn.linear_derivative

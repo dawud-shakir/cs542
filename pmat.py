@@ -66,7 +66,7 @@ class pmat:
     grid_comm = create_grid_comm()
 
     @staticmethod
-    def from_numpy(M_numpy: np.ndarray) -> 'pmat':
+    def from_numpy(M_numpy: np.ndarray, dtype=np.float64) -> 'pmat':
     
         n, m = M_numpy.shape       
 
@@ -77,8 +77,7 @@ class pmat:
         # numpy array from shared memory
         ########################################################################
 
-
-        M_pmat = pmat(n, m)
+        M_pmat = pmat(n, m, dtype=dtype)
         extent = M_pmat.extent[coords[0]][coords[1]]
         position = M_pmat.position[coords[0]][coords[1]]
 
@@ -91,6 +90,7 @@ class pmat:
         # Set up the shared array
         ########################################################################
         type = M_pmat.local.dtype
+
         type_bytes = np.dtype(type).itemsize
         size = int(np.prod(M_pmat.shape)) * type_bytes
 
@@ -221,7 +221,7 @@ class pmat:
     # Constructor
     ############################################################################
 
-    def __init__(self, n, m, local=None):
+    def __init__(self, n, m, local=None, dtype=np.float64):
     # def __init__(self, shape: tuple[int, int], local=None):
 
         Pr = pmat.grid_comm.dims[0]
@@ -247,7 +247,7 @@ class pmat:
         ########### Also in method self._set_local(local) ##################
 
         # Local block will be (n_pad, m_pad) larger than local if there is zero padding.
-        self.local = np.zeros((self.n_loc, self.m_loc), dtype=np.double)
+        self.local = np.zeros((self.n_loc, self.m_loc), dtype=dtype)
         self.local = np.ascontiguousarray(self.local)
         
         if local is not None:
@@ -445,7 +445,7 @@ class pmat:
         Pr = pmat.grid_comm.dims[0]
         Pc = pmat.grid_comm.dims[1]
 
-        M = np.zeros((self.n_loc * Pr, self.m_loc * Pc))
+        M = np.zeros((self.n_loc * Pr, self.m_loc * Pc), dtype=self.local.dtype)
 
         # All processes gather a copy of all blocks
         all_blocks = pmat.grid_comm.allgather(self.local)

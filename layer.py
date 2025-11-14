@@ -65,7 +65,7 @@ class Parallel_Layer:
          
         
 
-        self.W = pmat(n=output_size, m=input_size+1) # +1 for bias 
+        self.p_W = pmat(n=output_size, m=input_size+1) # +1 for bias 
 
 
 
@@ -87,20 +87,20 @@ class Parallel_Layer:
         # Initialize local blocks directly
         ############################################################
 
-        if self.W.coords[1] == 0:
+        if self.p_W.coords[1] == 0:
             # Only blocks with the first column have a bias column
-            weight_local = np.random.uniform(-weight_bound, weight_bound, size=(self.W.n_loc, self.W.m_loc-1))
+            weight_local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc-1))
             
-            bias_local = np.random.uniform(-bias_bound, bias_bound, size=(self.W.n_loc, 1))
+            bias_local = np.random.uniform(-bias_bound, bias_bound, size=(self.p_W.n_loc, 1))
 
             local = np.hstack([bias_local, weight_local])
 
         else:
             # Every other block has no bias column
-            local = np.random.uniform(-weight_bound, weight_bound, size=(self.W.n_loc, self.W.m_loc))
+            local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc))
 
 
-        self.W._set_local(local) # (out, in+1)
+        self.p_W._set_local(local) # (out, in+1)
 
         ############################################################
 
@@ -135,7 +135,7 @@ class Parallel_Layer:
         # Second comment:
         # self.m, self.v = np.zeros(self.W.shape), np.zeros(self.W.shape) 
 
-        n, m = self.W.shape
+        n, m = self.p_W.shape
         self.m, self.v = pmat(n, m), pmat(n, m)
 
         ############################################################
@@ -186,10 +186,10 @@ class Parallel_Layer:
         self.p_X = self._with_bias(p_X_no_bias) # (in+1, batch)
 
         # (out, batch)
-        self.p_a = self.W @ self.p_X
+        self.p_a = self.p_W @ self.p_X
         self.p_h = self.phi(self.p_a)
 
-        assert self.W.shape[1] == self.p_X.shape[0], (self.W.shape, self.p_X.shape)
+        assert self.p_W.shape[1] == self.p_X.shape[0], (self.p_W.shape, self.p_X.shape)
 
         return self.p_h
 
@@ -278,7 +278,7 @@ class Parallel_Layer:
         assert p_dL_da.shape == self.p_a.shape, (p_dL_da.shape, self.p_a.shape)
         p_dL_dW = p_dL_da @ self.p_X.T
 
-        p_W_no_bias = self.W.remove_first_column()
+        p_W_no_bias = self.p_W.remove_first_column()
 
         p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
 
@@ -367,7 +367,7 @@ class Parallel_Layer:
         self.t += 1
         p_g = p_dL_dW
         if self.weight_decay != 0:
-            p_g = p_g + self.weight_decay * self.W
+            p_g = p_g + self.weight_decay * self.p_W
 
         p_m = self.m
         p_v = self.v
@@ -380,7 +380,7 @@ class Parallel_Layer:
         p_m_hat = p_m / (1 - self.b1 ** self.t)
         p_v_hat = p_v / (1 - self.b2 ** self.t)
 
-        self.W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
+        self.p_W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
 
         self.dL_dW = None # Do not allow the same gradient to be used again
 
