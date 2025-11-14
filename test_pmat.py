@@ -1,8 +1,9 @@
-# test.py
+# test_pmat.py
 
 import numpy as np
 
-from matplotlib.pyplot import sca
+np.set_printoptions(precision=1, suppress=True, floatmode='fixed')
+
 from pmat import pmat, create_grid_comm, print_matrix
 axis = 1
 grid = create_grid_comm()
@@ -57,9 +58,10 @@ def test(n, k, m, dtype=np.double):
     if grid.rank == 0:           
         print(f"Testing n={n}, k={k}, m={m}...")
     
-    A_mat = (np.arange(1, n * k + 1) / (n * k)).reshape(n, k).astype(dtype)
+    A_mat = (np.arange(1, n * k + 1) / (n * k)).reshape(n, k).astype(dtype)    
     B_mat = (np.arange(1, k * m + 1) / (k * m)).reshape(k, m).astype(dtype)
     D_mat = (np.arange(1, m * n + 1) / (n * m)).reshape(m, n).astype(dtype)
+
 
     A = pmat.from_numpy(A_mat)
 
@@ -100,7 +102,15 @@ def test(n, k, m, dtype=np.double):
     # Exponentiation
     check(np.exp(A), np.exp(A_mat), "exp(A)")
 
-    # Greater than
+    # Scalar operations
+    check(A + 5, A_mat + 5, "A + 5")
+    check(5 + A, 5 + A_mat, "5 + A")
+    check(A - 5, A_mat - 5, "A - 5")
+    check(5 - A, 5 - A_mat, "5 - A")
+    check(A * 5, A_mat * 5, "A * 5")
+    check(5 * A, 5 * A_mat, "5 * A")
+    check(A / 5, A_mat / 5, "A / 5")
+    check(5 / A, 5 / A_mat, "5 / A")    
     check(A > 5, A_mat > 5, "A > 5")
 
     ################################################################
@@ -129,32 +139,48 @@ def test(n, k, m, dtype=np.double):
     row_pvec = pmat.from_numpy(row_vec)
     check(row_pvec @ A, row_vec @ A_mat, "vecmat")
 
+
+
     # Column vector = k...1
-    col_vec = np.array(np.arange(k+1, 1, -1), ndmin=2).reshape(-1, 1) 
+    col_vec = np.array(np.arange(k+1, 1, -1) / k, ndmin=2).reshape(-1, 1) 
     col_pvec = pmat.from_numpy(col_vec)
     check(A @ col_pvec, A_mat @ col_vec, "matvec")
+
+    ###############
+    # Test Python's broadcast betweeen a matrix and a vector
+    
+    # Column vector operations
+    col_vec = np.array(np.arange(1, n + 1) / n, ndmin=2).reshape(n, 1) 
+    col_pmat = pmat.from_numpy(col_vec)
+
+    # check(A + A_rand_mat, A_mat + A_rand, "A + rand(A)")
+
+
+    check(A - col_pmat, A_mat - col_vec, "A - col_vec")
+
+    check(col_pmat - A, col_vec - A_mat, "col_vec - A")
+
+    check(col_pmat - col_pmat, col_vec - col_vec, "col_vec - col_vec")
+    # check(A * A_rand_mat, A_mat * A_rand, "A * rand(A)")
+
+    # Row vector operations
+    row_vec = np.array(np.arange(1, k + 1), ndmin=2).reshape(1, k) 
+    row_pmat = pmat.from_numpy(row_vec)
+
+    # check(A + A_rand_mat, A_mat + A_rand, "A + rand(A)")
+    check(A - row_pmat, A_mat - row_vec, "A - row_vec")
+    
+    check(row_pmat - A, row_vec - A_mat, "row_vec - A")
+    
+    check(row_pmat - row_pmat, row_vec - row_vec, "row_vec - row_vec")
+    # check(A * A_rand_mat, A_mat * A_rand, "A * rand(A)")
+
+
+
 
     ################################################################
     # End tests
     ################################################################
-
-    # if grid.rank == 0:
-    #     A_extent = A.extent
-    #     B_extent = B.extent
-
-
-    #     print_matrix(A.extent, name="A extent")
-    #     print_matrix(B.extent, name="B extent")
-    #     print()
-        
-    # A.print_pretty("A", remove_padding=False)
-    # B.print_pretty("B", remove_padding=False)
-
-    #     # for i in range(Pr):
-    #     #     for j in range(Pc):
-    #     #         print(f"{A_extent[i][j][1]} {B_extent[j][i][0]}")
-   
-
 
 if __name__ == "__main__":
     
