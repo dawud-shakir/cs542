@@ -44,13 +44,18 @@ def print_matrix(my_list, name=""):
 
 def print_ordered_by_rank(x, *args, **kwargs):
     grid = kwargs.get('comm', create_grid_comm())
-
-    with_ranks = kwargs.get('with_ranks', np.arange(0, grid.Get_size()).tolist())
-
     for p in range(grid.Get_size()):
         grid.Barrier()
-        if p == grid.rank and grid.rank in with_ranks:
+        if p == grid.rank:
             print(x, *args, **kwargs)
+
+    # grid = kwargs.get('comm', create_grid_comm())
+    # with_ranks = kwargs.get('with_ranks', np.arange(0, grid.Get_size()).tolist())
+
+    # for p in range(grid.Get_size()):
+    #     grid.Barrier()
+    #     if p == grid.rank and grid.rank in with_ranks:
+    #         print(x, *args, **kwargs)
 
 def print_pmat_on_rank0(M: 'pmat', msg=""):
     comm = M.grid_comm
@@ -326,6 +331,30 @@ class pmat:
 
         self.block_size = extent[self.coords[0]][self.coords[1]]
         self.block_loc = position[self.coords[0]][self.coords[1]]
+
+
+        ### Create subcommunicator for non-empty blocks only
+            
+        # Note: In extents' initialization, if the column size of a block is zero, so is its row size, and vice versa.
+
+        grid = self.grid_comm
+        coords = self.coords
+        non_empty = []
+        row_extents = self.extent[coords[0]]
+        for j in range(grid.dims[1]):   # by cols
+            if row_extents[j][1] > 0:
+                non_empty.append(grid.Get_cart_rank((coords[0], j)))
+
+        group = grid.Get_group()
+        row_group = group.Incl(non_empty)
+        row_comm = grid.Create(row_group)
+
+        if row_comm != MPI.COMM_NULL and len(non_empty) > 0:
+            dims = [1, len(non_empty)]
+            periods = [True, True]
+            self.subgrid = row_comm.Create_cart(dims, periods, reorder=True)
+        else:
+            self.subgrid = MPI.COMM_NULL
 
  
     def copy(self):
@@ -790,7 +819,9 @@ class pmat:
             if issubclass(warning.category, RuntimeWarning):
                 
                 local_str = f"\nOriginal local:\n{self.local}\n\nResult matrix:\n{result}"
+
                 print(f"\033[91m{pmat.grid_comm.coords}: Caught a RuntimeWarning: {warning.message}\033[0m")
+
                 # pmat.grid_comm.Abort(-1)
 
         
@@ -851,8 +882,10 @@ class pmat:
 
         # assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
 
+
         if axis == 1:
-            row_group = self.grid_comm.Sub([False, True])  # rows
+            subgrid = self.subgrid
+
 
             dtype = self.dtype
             coords = self.coords
@@ -860,26 +893,34 @@ class pmat:
             local = self.local[:extent[0], :extent[1]]
 
             row_sum = []
+            if subgrid != MPI.COMM_NULL:
+                row_comm = subgrid.Sub([False, True])  # rows
 
-            for row in range(extent[0]):
-                # Reduce to the root of each group
-                local_sum = np.sum(local[row, :])
-                row_sum.append(row_group.reduce(local_sum, op=MPI.SUM, root=0))
+                for row in range(extent[0]):
+                    # Reduce to the root of each group
+                    local_sum = np.sum(local[row, :])
+                    row_sum.append(row_comm.reduce(local_sum, op=MPI.SUM, root=0))
 
-            if self.grid_comm.coords[1] == 0:
-                row_sum = np.array([x for x in row_sum if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # row_sum is now a column vector
+                if self.grid_comm.coords[1] == 0:
+                    row_sum = np.array([x for x in row_sum if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # row_sum is now a column vector
+                else:
+                    row_sum = None
             else:
                 row_sum = None
 
             return pmat(self.n, 1, row_sum)
         elif axis == None:
+            grid = self.grid_comm
+
             # Global sum
             coords = self.coords
             extent = self.extent[coords[0]][coords[1]]
             local = self.local[:extent[0], :extent[1]]
 
             local_sum = np.sum(local)
-            global_sum = self.grid_comm.allreduce(local_sum, op=MPI.SUM)
+            print("before global sum")
+                        
+            global_sum = grid.allreduce(local_sum, op=MPI.SUM)
             return global_sum
         else:
             raise NotImplementedError("psum axis=0 not implemented yet")
@@ -890,22 +931,27 @@ class pmat:
         assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
 
         if axis == 1:
-            horz_group = self.grid_comm.Sub([False, True])  # rows
+            subgrid = self.subgrid
+            
+            if subgrid != MPI.COMM_NULL:
+                horz_group = subgrid.Sub([False, True])  # rows
 
-            dtype = self.dtype
-            coords = self.coords
-            extent = self.extent[coords[0]][coords[1]]
-            local = self.local[:extent[0], :extent[1]]
+                dtype = self.dtype
+                coords = self.coords
+                extent = self.extent[coords[0]][coords[1]]
+                local = self.local[:extent[0], :extent[1]]
 
-            row_max = []
+                row_max = []
 
-            for row in range(extent[0]):
-                # Reduce to the root of each group
-                local_max = np.max(local[row, :])
-                row_max.append(horz_group.reduce(local_max, op=MPI.MAX, root=0))
+                for row in range(extent[0]):
+                    # Reduce to the root of each group
+                    local_max = np.max(local[row, :])
+                    row_max.append(horz_group.reduce(local_max, op=MPI.MAX, root=0))
 
-            if self.grid_comm.coords[1] == 0:
-                row_max = np.array([x for x in row_max if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # maxs is now a column vector
+                if self.grid_comm.coords[1] == 0:
+                    row_max = np.array([x for x in row_max if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # maxs is now a column vector
+                else:
+                    row_max = None
             else:
                 row_max = None
 
@@ -918,85 +964,85 @@ class pmat:
         assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
 
         if axis == 1:
-            # horz_comm = self.grid_comm.Sub([False, True])  # rows
+            ############## Slower using allgather than below ###################
+            # subgrid = self.subgrid
 
             # dtype = self.dtype
             # coords = self.coords
             # position = self.position[coords[0]][coords[1]]
             # extent = self.extent[coords[0]][coords[1]]
             # local = self.local[:extent[0], :extent[1]]
+            # num_rows = self.block_size[0]
 
             # result = np.zeros((extent[0], 2), dtype=(np.int64, self.dtype))
-            # # self.print_pretty()
-            # import time
-
-            # # start = time.perf_counter()
-            # for row in range(extent[0]):
-            #     local_max = dtype(np.max(local[row, :]))
-            #     local_idx = np.int64(np.argmax(local[row, :]))
-            #     global_idx = np.int64(local_idx + position[1])
-
-
-            #     row_max_combined = np.zeros((1, horz_comm.size), dtype=dtype)
-            #     row_idx_combined = np.zeros((1, horz_comm.size), dtype=np.int64)
-
-            #     horz_comm.Allgather(local_max, row_max_combined)
-            #     horz_comm.Allgather(global_idx, row_idx_combined)
-
-            #     idx = np.argmax(row_max_combined)
-            #     result[row, 0] = row_idx_combined.flatten()[idx]
-            #     result[row, 1] = row_max_combined.flatten()[idx]
-
-            # local_argmax = result[:,0].reshape(extent[0], 1)
             
-            # end = time.perf_counter()
+            # if subgrid == MPI.COMM_NULL:
+            #     # Return type is np.int64 for argmax
+            #     return pmat(self.n, 1, local=None, dtype=np.int64)
 
-            # # if self.rank == 0:
-            # #     print("allgather time: {:.6f} {}".format(end-start, self.shape))
-            # return pmat(self.n, 1, local=local_argmax, dtype=np.int64)
+            # else:
+            #     horz_comm = subgrid.Sub([False, True])  # rows
+
+            #     for row in range(num_rows): 
+                    
+            #         local_max = dtype(np.max(local[row, :]))
+            #         local_idx = np.int64(np.argmax(local[row, :]))
+            #         global_idx = np.int64(local_idx + position[1])
 
 
+            #         row_max_combined = np.zeros((1, horz_comm.size), dtype=dtype)
+            #         row_idx_combined = np.zeros((1, horz_comm.size), dtype=np.int64)
+
+            #         horz_comm.Allgather(local_max, row_max_combined)
+            #         horz_comm.Allgather(global_idx, row_idx_combined)
+
+            #         idx = np.argmax(row_max_combined)
+            #         result[row, 0] = row_idx_combined.flatten()[idx]
+            #         result[row, 1] = row_max_combined.flatten()[idx]
+
+            #     argmax = result[:,0].reshape(num_rows, 1)
+
+            #     # Return type is np.int64 for argmax
+            #     return pmat(self.n, 1, local=argmax, dtype=np.int64)
 
             #### Slightly faster to use allreduce #########################
-
-
-            
-            horz_comm = self.grid_comm.Sub([False, True])  # rows
+            subgrid = self.subgrid
 
             dtype = self.dtype
             coords = self.coords
             position = self.position[coords[0]][coords[1]]
             extent = self.extent[coords[0]][coords[1]]
             local = self.local[:extent[0], :extent[1]]
+            num_rows = self.block_size[0]
 
             result = np.zeros((extent[0], 2), dtype=(np.int64, self.dtype))
             
-            # start = time.perf_counter()
-            for row in range(extent[0]):
-                local_max = dtype(np.max(local[row, :]))
-                local_idx = np.int64(np.argmax(local[row, :]))
-                global_idx = np.int64(local_idx + position[1])
-                mpi_dtype = np.dtype([('value', np.float64), ('index', np.int32)], align=True)
-                sendbuf = np.array([(local_max, global_idx)], dtype=mpi_dtype)  
-                recvbuf = np.array([(0.0, 0)], dtype=mpi_dtype)
+            if subgrid == MPI.COMM_NULL:
+                # Return type is np.int64 for argmax
+                return pmat(self.n, 1, local=None, dtype=np.int64)
 
-                # Allreduce with MAXLOC
-                horz_comm.Allreduce([sendbuf, MPI.DOUBLE_INT], [recvbuf, MPI.DOUBLE_INT], op=MPI.MAXLOC)
-
-                result[row,:] = recvbuf['index'][0]
-
-            row_argmax = result[:,0].reshape(extent[0], 1) if coords[1] == 0 else None
-
-            if self.grid_comm.coords[1] == 0:    
-                row_argmax = np.array([x for x in row_argmax if x is not np.nan]).flatten().reshape(-1, 1) # row_argmax is now a column vector
             else:
-                row_argmax = None
+                horz_comm = subgrid.Sub([False, True])  # rows
 
-            # end = time.perf_counter()
-            # if self.rank == 0:
-            #     print(f"allreduce time: {(end-start):.6f}, {self.shape}")
-            return pmat(self.n, 1, local=row_argmax, dtype=np.int64)
-            
+                for row in range(num_rows): 
+                    
+                    local_max = dtype(np.max(local[row, :]))
+                    local_idx = np.int64(np.argmax(local[row, :]))
+                    global_idx = np.int64(local_idx + position[1])
+
+                    mpi_dtype = np.dtype([('value', np.float64), ('index', np.int32)], align=True)
+                    sendbuf = np.array([(local_max, global_idx)], dtype=mpi_dtype)  
+                    recvbuf = np.array([(0.0, 0)], dtype=mpi_dtype)
+
+                    # Allreduce with MAXLOC
+                    horz_comm.Allreduce([sendbuf, MPI.DOUBLE_INT], [recvbuf, MPI.DOUBLE_INT], op=MPI.MAXLOC)
+
+                    result[row,:] = recvbuf['index'][0]
+
+                argmax = result[:,0].reshape(num_rows, 1)
+
+                # Return type is np.int64 for argmax
+                return pmat(self.n, 1, local=argmax, dtype=np.int64)
 
     def pmean(self, *args, **kwargs):
         axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows

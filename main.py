@@ -243,8 +243,8 @@ def main():
             
             print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()}")
 
-
-        print(f"#### Epoch {epoch+1} test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
+        ### Original version ##########
+        # print(f"#### Epoch {epoch+1} test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
 
 
     print(f"Final test accuracy: {acc:.4f}")
