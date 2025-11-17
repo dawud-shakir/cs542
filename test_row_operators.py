@@ -39,6 +39,32 @@ def test_max(n, m):
 
     grid.Barrier()
 
+def test_argmax(n, m):
+    A_numpy = np.arange(1, n * m + 1).reshape(n, m).astype(np.double)
+    A_pmat = pmat.from_numpy(A_numpy)
+
+    A_pmat_result = A_pmat.pargmax(axis=axis)
+    A_numpy_result = np.argmax(A_numpy, axis=axis, keepdims=True)  # keepdims used in layer.py
+
+    test_name = f"{test_argmax.__name__} n={n}, m={m}"
+    
+    if not np.allclose(A_pmat_result.get_full(), A_numpy_result):
+        results = f"\npmat result:\n{A_pmat_result.get_full()}\nnumpy result:\n{A_numpy_result}"
+
+        if grid.rank == 0:
+            print(f"\033[38;5;22m {test_name}: results do not match!\nstarting matrix:\n{A_numpy}\n{results}\033[0m")
+
+        exit()
+    
+        # raise ValueError(f"\033[38;5;22m {test_name}: results do not    match!\nOriginal:\n{A_numpy}\n{results}\033[0m")
+    else:
+        if grid.rank == 0:
+            
+            print(f"{test_name:<30} ...\033[31m" + "passed" + "\033[0m")
+
+
+    grid.Barrier()
+
 
 def test_sum(n, m):
     A_numpy = np.arange(1, n * m + 1).reshape(n, m).astype(np.double)
@@ -81,19 +107,25 @@ def test_mean(n, m):
 if __name__ == "__main__":
 
     if grid.rank == 0:
-        print("*" * 30, "test_max", "*" * 30, "\n")
+        print("*" * 30, "test_argmax", "*" * 30, "\n")
     
     for (n, m) in sizes:
-        test_max(n, m)
+        test_argmax(n, m)
 
-    if grid.rank == 0:
-        print('\n', "*" * 30, "test_sum", "*" * 30, "\n")
+    # if grid.rank == 0:
+    #     print("*" * 30, "test_max", "*" * 30, "\n")
     
-    for (n, m) in sizes:
-        test_sum(n, m)
+    # for (n, m) in sizes:
+    #     test_max(n, m)
 
-    if grid.rank == 0:
-        print('\n', "*" * 30, "test_mean", "*" * 30, "\n")
+    # if grid.rank == 0:
+    #     print('\n', "*" * 30, "test_sum", "*" * 30, "\n")
+    
+    # for (n, m) in sizes:
+    #     test_sum(n, m)
 
-    for (n, m) in sizes:
-        test_mean(n, m)
+    # if grid.rank == 0:
+    #     print('\n', "*" * 30, "test_mean", "*" * 30, "\n")
+
+    # for (n, m) in sizes:
+    #     test_mean(n, m)

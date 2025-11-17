@@ -2,6 +2,7 @@
 main.py
 """
 
+from math import e
 import numpy as np
 np.random.seed(0)  # Reproducibility
 np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
@@ -145,7 +146,13 @@ def main():
         for (batch_num, batch_idx) in enumerate(batches_idx):
             # Get batch data
             X = X_train[batch_idx]  # (batch_size, 784)
+            
+            
+            ###### Original version ##########
             Y = y_train[batch_idx]  # (batch_size,)
+            
+            ###### pmat verson ####
+            # Y = Y.reshape(1, -1) # make 2d
 
             # Forward pass
             h1 = fc1.forward(X)   # (64, batch)
@@ -162,9 +169,28 @@ def main():
 
             ######### patmat version ##########
             p_log_probs = nn.log_softmax(p_logits.T)  # Shape: (batch_size, 10)
+            loss = nn.nll_loss(p_log_probs, Y)
+            
 
-            acc = np.sum(np.argmax(p_log_probs.get_full(), axis=1) == Y) / Y.shape[0]
-            loss = nn.nll_loss(p_log_probs.get_full(), Y)
+
+            # numpy_argmax = np.argmax(p_log_probs.get_full(), axis=1, keepdims=True)
+            # numpy_cmp = np.argmax(p_log_probs.get_full(), axis=1) == Y
+            # numpy_sum = np.sum(numpy_cmp)
+            # numpy_acc = numpy_sum / Y.shape[0]
+
+            pmat_argmax = np.argmax(p_log_probs, axis=1)
+            p_Y = pmat.from_numpy(Y.reshape(-1,1))
+            pmat_cmp = (pmat_argmax == p_Y)
+            pmat_sum = np.sum(pmat_cmp)
+            pmat_acc = pmat_sum / p_Y.shape[0]
+
+
+            acc = pmat_acc
+
+            # ####### Original version ##########
+            # acc = np.sum(np.argmax(p_log_probs.get_full(), axis=1) == Y) / Y.shape[0]
+            # loss = nn.nll_loss(p_log_probs.get_full(), Y)
+
 
 
             ####### Original version ##########
