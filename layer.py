@@ -65,10 +65,11 @@ class Parallel_Layer:
          
         
 
-        self.p_W = pmat(n=output_size, m=input_size+1) # +1 for bias 
+        
 
-
-
+        ############################################################
+        # Initialize weights and biases
+        ############################################################
 
         # Weights: Uniform initialization (Xavier)
         weight_bound = np.sqrt(6.0 / (input_size + output_size))
@@ -76,31 +77,33 @@ class Parallel_Layer:
         # Bias column: Uniform(-1/sqrt(fan_in), +1/sqrt(fan_in))
         bias_bound = 1.0 / np.sqrt(input_size)
 
-        # W = np.random.uniform(-weight_bound, weight_bound, size=(output_size, input_size))
-        # bias = np.random.uniform(-bias_bound, bias_bound, size=(output_size, 1))
+        W = np.random.uniform(-weight_bound, weight_bound, size=(output_size, input_size))
+        bias = np.random.uniform(-bias_bound, bias_bound, size=(output_size, 1))
 
-        # W = np.hstack([bias, W]) # (out, in+1)
+        W = np.hstack([bias, W]) # (out, in+1)
 
-        # self.W = pmat.from_numpy(W)
+        self.p_W = pmat.from_numpy(W)
 
         ############################################################
         # Initialize local blocks directly
         ############################################################
 
-        if self.p_W.coords[1] == 0:
-            # Only blocks with the first column have a bias column
-            weight_local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc-1))
+        # self.p_W = pmat(n=output_size, m=input_size+1) # +1 for bias 
+
+        # if self.p_W.coords[1] == 0:
+        #     # Only blocks with the first column have a bias column
+        #     weight_local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc-1))
             
-            bias_local = np.random.uniform(-bias_bound, bias_bound, size=(self.p_W.n_loc, 1))
+        #     bias_local = np.random.uniform(-bias_bound, bias_bound, size=(self.p_W.n_loc, 1))
 
-            local = np.hstack([bias_local, weight_local])
+        #     local = np.hstack([bias_local, weight_local])
 
-        else:
-            # Every other block has no bias column
-            local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc))
+        # else:
+        #     # Every other block has no bias column
+        #     local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc))
 
 
-        self.p_W._set_local(local) # (out, in+1)
+        # self.p_W._set_local(local) # (out, in+1)
 
         ############################################################
 
