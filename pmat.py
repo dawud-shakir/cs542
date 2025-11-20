@@ -101,8 +101,8 @@ class pmat:
         ########################################################################
 
         M_pmat = pmat(n, m, dtype=dtype)
-        extent = M_pmat.extent[coords[0]][coords[1]]
-        position = M_pmat.position[coords[0]][coords[1]]
+        extent = M_pmat.extents[coords[0]][coords[1]]
+        position = M_pmat.offsets[coords[0]][coords[1]]
 
         row_start, row_end = position[0], position[0] + extent[0]
         col_start, col_end = position[1], position[1] + extent[1]
@@ -326,12 +326,18 @@ class pmat:
         for v in m_loc_extent[:-1]:
             m_loc_pos.append(m_loc_pos[-1] + v)
 
-        position = [[(a,b) for b in m_loc_pos] for a in n_loc_pos]
-        self.extent = extent
-        self.position = position
+        offsets = [[(a,b) for b in m_loc_pos] for a in n_loc_pos]
+        self.extents = extent
+        self.offsets = offsets
 
-        self.block_size = extent[self.coords[0]][self.coords[1]]
-        self.block_loc = position[self.coords[0]][self.coords[1]]
+        self.block_extent = extent[self.coords[0]][self.coords[1]]
+        self.block_offset = offsets[self.coords[0]][self.coords[1]]
+
+        nonempty_in_row = sum(1 for i in range(Pr) if extent[i][0][0] > 0)
+        nonempty_in_col = sum(1 for j in range(Pc) if extent[0][j][1] > 0)
+
+
+        self.nonempty_shape = (nonempty_in_row, nonempty_in_col)
 
 
         ### Create subcommunicator for non-empty blocks only
@@ -343,7 +349,7 @@ class pmat:
         ######################################################################### Row and Column subcommunicators for non-empty blocks
         ########################################################################
         non_empty = []
-        row_extents = self.extent[self.coords[0]][:]
+        row_extents = self.extents[self.coords[0]][:]
         for j in range(grid.dims[1]):   # by cols
             if row_extents[j][1] > 0:
                 non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
@@ -353,7 +359,7 @@ class pmat:
         self.row_comm = grid.Create(row_group)
 
         non_empty = []
-        col_extents = self.extent[:][self.coords[1]]
+        col_extents = self.extents[:][self.coords[1]]
         for j in range(grid.dims[0]):   # by rows
             if col_extents[j][0] > 0:
                 non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
@@ -392,22 +398,29 @@ class pmat:
         
         numpy_result = self.get_full()[idx]
         
+        
         idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
         idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+        assert(len(idx0) == len(idx1))
 
-        local_values = np.array((1, 0), dtype=self.local.dtype)
+        local_values = []
         for (global_i, global_j) in zip(idx0, idx1):
                 rank_i, block_i = divmod(global_i, self.n_loc)
                 rank_j, block_j = divmod(global_j, self.m_loc)
                 
                 if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
-                    local_values = np.append(local_values, self.local[block_i, block_j])
+                    local_values.append(self.local[block_i, block_j])
+
+        local_values = np.array(local_values, dtype=self.local.dtype)
+
+        # padded = np.full(len(idx0), np.nan, dtype=self.local.dtype)
+        # padded[:len(local_values)] = local_values
 
         # global_values = np.array((1, len(idx0)), dtype=self.local.dtype)
-        # self.grid_comm.Allgather(local_values, global_values)
+        # self.grid_comm.Allgather(padded, global_values)
 
-        # if not np.allclose(global_values, numpy_result):
-            # raise ValueError(f"pmat __getitem__ mismatch with numpy result\n")
+        # if not np.allclose(np.array(local_values), numpy_result):
+        #     raise ValueError(f"pmat __getitem__ mismatch with numpy result\n")
 
         return local_values
 
@@ -471,8 +484,8 @@ class pmat:
         n, m = self.shape        
         
         coords = pmat.grid_comm.coords
-        extent = self.extent[coords[0]][coords[1]]
-        position = self.position[coords[0]][coords[1]]
+        extent = self.extents[coords[0]][coords[1]]
+        position = self.offsets[coords[0]][coords[1]]
 
         row_start, row_end = position[0], position[0] + extent[0]
         col_start, col_end = position[1], position[1] + extent[1]
@@ -481,8 +494,8 @@ class pmat:
 
         # Set up the submatrix
         submat = pmat(n, m - 1)
-        submat_extent = submat.extent[coords[0]][coords[1]]
-        submat_position = submat.position[coords[0]][coords[1]]
+        submat_extent = submat.extents[coords[0]][coords[1]]
+        submat_position = submat.offsets[coords[0]][coords[1]]
 
         submat_row_start, submat_row_end = submat_position[0], submat_position[0] + submat_extent[0]
         submat_col_start, submat_col_end = col_offset + submat_position[1], col_offset + submat_position[1] + submat_extent[1]
@@ -531,7 +544,7 @@ class pmat:
         return submat    
 
     def get_local(self):
-        n_loc, m_loc = self.extent[self.coords[0]][self.coords[1]]
+        n_loc, m_loc = self.extents[self.coords[0]][self.coords[1]]
         return self.local[:n_loc, :m_loc]
 
     def _set_local(self, local):
@@ -600,22 +613,22 @@ class pmat:
         # Scalar broadcasting
         
         if np.isscalar(B):
-            A_extent = A.extent[A.coords[0]][A.coords[1]]
+            A_extent = A.extents[A.coords[0]][A.coords[1]]
             A_local = A.local[:A_extent[0], :A_extent[1]]
 
             return A_local, B, (A.n, A.m)
         elif np.isscalar(A):
-            B_extent = B.extent[B.coords[0]][B.coords[1]]
+            B_extent = B.extents[B.coords[0]][B.coords[1]]
             B_local = B.local[:B_extent[0], :B_extent[1]]
 
             return A, B_local, (B.n, B.m)
 
         
         # Operands are without padding
-        A_extent = A.extent[A.coords[0]][A.coords[1]]
+        A_extent = A.extents[A.coords[0]][A.coords[1]]
         A_local = A.local[:A_extent[0], :A_extent[1]]
         
-        B_extent = B.extent[B.coords[0]][B.coords[1]]
+        B_extent = B.extents[B.coords[0]][B.coords[1]]
         B_local = B.local[:B_extent[0], :B_extent[1]]
 
         # Output shape is a matrix
@@ -630,25 +643,25 @@ class pmat:
         
         if B.shape == (A.n, 1) and B.m != A.m:  
             if A.col_comm == MPI.COMM_NULL:
-                return None, None, output_shape
+                return A_local, A_local, output_shape
             else:
                 B_local = A.col_comm.bcast(B_local, root=0)
                 return A_local, B_local, output_shape
         elif A.shape == (B.n, 1) and A.m != B.m:           
-            if A.col_comm == MPI.COMM_NULL:
-                return None, None, output_shape
+            if B.col_comm == MPI.COMM_NULL:
+                return B_local, B_local, output_shape
             else:
                 A_local = B.col_comm.bcast(A_local, root=0)
                 return A_local, B_local, output_shape
         elif B.shape == (1, A.m) and B.n != A.n:  
-            if B.row_comm == MPI.COMM_NULL:
-                return None, None, output_shape
+            if A.row_comm == MPI.COMM_NULL:
+                return A_local, A_local, output_shape
             else:         
                 B_local = A.row_comm.bcast(B_local, root=0)
                 return A_local, B_local, output_shape
         elif A.shape == (1, B.m) and A.n != B.n:
-            if A.row_comm == MPI.COMM_NULL:
-                return None, None, output_shape
+            if B.row_comm == MPI.COMM_NULL:
+                return B_local, B_local, output_shape
             else:
                 A_local = B.row_comm.bcast(A_local, root=0)
                 return A_local, B_local, output_shape
@@ -869,7 +882,7 @@ class pmat:
     # Universal functions (np.exp, np.add, etc.)
     ############################################################################
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
-        extent = self.extent[self.coords[0]][self.coords[1]]
+        extent = self.extents[self.coords[0]][self.coords[1]]
         local = self.local[:extent[0], :extent[1]]
 
         # Convert inputs to arrays
@@ -950,7 +963,7 @@ class pmat:
         if axis == 1:
             dtype = self.dtype
             coords = self.coords
-            extent = self.extent[coords[0]][coords[1]]
+            extent = self.extents[coords[0]][coords[1]]
             local = self.local[:extent[0], :extent[1]]
 
             row_sum = []
@@ -973,7 +986,7 @@ class pmat:
 
             # Global sum
             coords = self.coords
-            extent = self.extent[coords[0]][coords[1]]
+            extent = self.extents[coords[0]][coords[1]]
             local = self.local[:extent[0], :extent[1]]
 
             local_sum = np.sum(local)
@@ -993,7 +1006,7 @@ class pmat:
             if self.row_comm != MPI.COMM_NULL:
                 dtype = self.dtype
                 coords = self.coords
-                extent = self.extent[coords[0]][coords[1]]
+                extent = self.extents[coords[0]][coords[1]]
                 local = self.local[:extent[0], :extent[1]]
 
                 row_max = []
@@ -1063,10 +1076,10 @@ class pmat:
             #### Slightly faster to use allreduce #########################
             dtype = self.dtype
             coords = self.coords
-            position = self.position[coords[0]][coords[1]]
-            extent = self.extent[coords[0]][coords[1]]
+            position = self.offsets[coords[0]][coords[1]]
+            extent = self.extents[coords[0]][coords[1]]
             local = self.local[:extent[0], :extent[1]]
-            num_rows = self.block_size[0]
+            num_rows = self.block_extent[0]
 
             result = np.zeros((extent[0], 2), dtype=(np.int64, self.dtype))
             
@@ -1148,8 +1161,8 @@ class pmat:
         
         # Set up the extented matrix
         newmat = pmat(n + 1, m )
-        newmat_extent = newmat.extent[coords[0]][coords[1]]
-        newmat_position = newmat.position[coords[0]][coords[1]]
+        newmat_extent = newmat.extents[coords[0]][coords[1]]
+        newmat_position = newmat.offsets[coords[0]][coords[1]]
 
         newmat_row_start, newmat_row_end = newmat_position[0], newmat_position[0] + newmat_extent[0]
         newmat_col_start, newmat_col_end = newmat_position[1], newmat_position[1] + newmat_extent[1]
@@ -1159,8 +1172,8 @@ class pmat:
         ########################################################################
         # Write each rank's local block to the shared array offset by one row
         ########################################################################
-        extent = self.extent[coords[0]][coords[1]]
-        position = self.position[coords[0]][coords[1]]
+        extent = self.extents[coords[0]][coords[1]]
+        position = self.offsets[coords[0]][coords[1]]
 
         row_start, row_end = position[0] + 1, position[0] + extent[0] + 1
         col_start, col_end = position[1], position[1] + extent[1]
@@ -1220,7 +1233,7 @@ def pzeros_like(M_pmat: pmat) -> pmat:
     newmat = pmat(M_pmat.n, M_pmat.m)
 
     coords = pmat.grid_comm.coords
-    extent = newmat.extent[coords[0]][coords[1]]
+    extent = newmat.extents[coords[0]][coords[1]]
 
     newmat.local[:extent[0], :extent[1]] = np.zeros((extent[0], extent[1]))
 
@@ -1230,7 +1243,7 @@ def p_ones_like(M_pmat: pmat) -> pmat:
     newmat = pmat(M_pmat.n, M_pmat.m)
 
     coords = pmat.grid_comm.coords
-    extent = newmat.extent[coords[0]][coords[1]]
+    extent = newmat.extents[coords[0]][coords[1]]
 
     newmat.local[:extent[0], :extent[1]] = np.ones((extent[0], extent[1]))
 
