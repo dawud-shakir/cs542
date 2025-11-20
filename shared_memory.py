@@ -59,8 +59,8 @@ def stack_ones_on_top(M: pmat) -> pmat:
     
     # Set up the extented matrix
     newmat = pmat(n + 1, m )
-    newmat_extent = newmat.extent[coords[0]][coords[1]]
-    newmat_position = newmat.position[coords[0]][coords[1]]
+    newmat_extent = newmat.extents[coords[0]][coords[1]]
+    newmat_position = newmat.offsets[coords[0]][coords[1]]
 
     newmat_row_start, newmat_row_end = newmat_position[0], newmat_position[0] + newmat_extent[0]
     newmat_col_start, newmat_col_end = newmat_position[1], newmat_position[1] + newmat_extent[1]
@@ -70,8 +70,8 @@ def stack_ones_on_top(M: pmat) -> pmat:
     ########################################################################
     # Write each rank's local block to the shared array offset by one row
     ########################################################################
-    extent = M.extent[coords[0]][coords[1]]
-    position = M.position[coords[0]][coords[1]]
+    extent = M.extents[coords[0]][coords[1]]
+    position = M.offsets[coords[0]][coords[1]]
 
     row_start, row_end = position[0] + 1, position[0] + extent[0] + 1
     col_start, col_end = position[1], position[1] + extent[1]
@@ -160,8 +160,8 @@ def from_numpy(M_numpy: np.ndarray) -> pmat:
 
 
     M_pmat = pmat(n, m)
-    extent = M_pmat.extent[coords[0]][coords[1]]
-    position = M_pmat.position[coords[0]][coords[1]]
+    extent = M_pmat.extents[coords[0]][coords[1]]
+    position = M_pmat.offsets[coords[0]][coords[1]]
 
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]
@@ -235,8 +235,8 @@ def remove_first_column(M: pmat) -> pmat:
 
 
     coords = pmat.grid_comm.coords
-    extent = M.extent[coords[0]][coords[1]]
-    position = M.position[coords[0]][coords[1]]
+    extent = M.extents[coords[0]][coords[1]]
+    position = M.offsets[coords[0]][coords[1]]
 
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]
@@ -245,8 +245,8 @@ def remove_first_column(M: pmat) -> pmat:
     
     # Set up the submatrix
     submat = pmat(n, m - 1)
-    submat_extent = submat.extent[coords[0]][coords[1]]
-    submat_position = submat.position[coords[0]][coords[1]]
+    submat_extent = submat.extents[coords[0]][coords[1]]
+    submat_position = submat.offsets[coords[0]][coords[1]]
 
     submat_row_start, submat_row_end = submat_position[0], submat_position[0] + submat_extent[0]
     submat_col_start, submat_col_end = col_offset + submat_position[1], col_offset + submat_position[1] + submat_extent[1]
@@ -339,8 +339,8 @@ def write_pmat_to_shared_memory(M: pmat):
 
 
     coords = pmat.grid_comm.coords
-    extent = M.extent[coords[0]][coords[1]]
-    position = M.position[coords[0]][coords[1]]
+    extent = M.extents[coords[0]][coords[1]]
+    position = M.offsets[coords[0]][coords[1]]
 
     row_start, row_end = position[0], position[0] + extent[0]
     col_start, col_end = position[1], position[1] + extent[1]

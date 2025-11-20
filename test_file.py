@@ -66,13 +66,15 @@ def write_pmat(pmat_matrix: pmat, filename: str):
     MPI.COMM_WORLD.Bcast(data_offset, root=0)
     data_offset = int(data_offset)  # Convert back to int
     
-    # Header must be written before data
+    # Wait for header to be written before writing any data
     comm.Barrier()  
     
-    # Each rank writes its local data at their offset
-    local_rows, local_cols = pmat_matrix.local.shape
-    row_offset = pmat_matrix.coords[0] * pmat_matrix.n_loc
-    col_offset = pmat_matrix.coords[1] * pmat_matrix.m_loc
+    coords = pmat_matrix.coords
+    extent = pmat_matrix.extents[coords[0]][coords[1]]
+    offset = pmat_matrix.offsets[coords[0]][coords[1]]
+
+    local_rows, local_cols = extent[0], extent[1]
+    row_offset, col_offset = offset[0], offset[1]
 
     for i in range(local_rows):
         global_row = row_offset + i
@@ -105,10 +107,12 @@ def read_pmat(filename: str) -> pmat:
     # Empty pmat
     pmat_matrix = pmat(nrows, ncols)
 
-    # Each rank reads its local data from its offset
-    local_rows, local_cols = pmat_matrix.local.shape
-    row_offset = pmat_matrix.coords[0] * pmat_matrix.n_loc
-    col_offset = pmat_matrix.coords[1] * pmat_matrix.m_loc
+    coords = pmat_matrix.coords
+    extent = pmat_matrix.extents[coords[0]][coords[1]]
+    offset = pmat_matrix.offsets[coords[0]][coords[1]]
+
+    local_rows, local_cols = extent[0], extent[1]
+    row_offset, col_offset = offset[0], offset[1]
 
     for i in range(local_rows):
         global_row = row_offset + i
@@ -125,15 +129,16 @@ def read_pmat(filename: str) -> pmat:
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(script_dir, 'data')
-os.makedirs(data_dir, exist_ok=True)  # Create the folder if it doesn't exist
+os.makedirs(data_dir, exist_ok=True)  # Create folder if it does not exist
 
 
 filename = os.path.join(data_dir, "pmat.dat")
-base, ext = os.path.splitext(filename)
-i = 1
-while os.path.exists(filename):
-    filename = os.path.join(data_dir, f"pmat_{i}{ext}")
-    i += 1
+
+# base, ext = os.path.splitext(filename)
+# i = 1
+# while os.path.exists(filename):
+#     filename = os.path.join(data_dir, f"pmat_{i}{ext}")
+#     i += 1
 
 # filename_only = os.path.basename(filename)  # 'pmat.py'
 
@@ -141,36 +146,35 @@ while os.path.exists(filename):
 
 
 
-## Create and write pmat ##############
+## Create pmat ##############
 
-n, m = 1000, 1000
+n, m = 1000,1000
 
 numpy_matrix = np.arange(1, n * m + 1).reshape((n, m))
-pmat_matrix = pmat.from_numpy(numpy_matrix)
 
 
+### Write pmat to file ##############
 
-# write_pmat(pmat_matrix, filename)
+pmat_write_matrix = pmat.from_numpy(numpy_matrix)
+# pmat_write_matrix.print_pretty("write_matrix", as_type="i")
 
-# if MPI.COMM_WORLD.rank == 0:
-#     print("Wrote pmat to", os.path.basename(filename))
-
-# ## Read pmat back in ##############
-
-# pmat_matrix_read_in = read_pmat(filename)
-# if MPI.COMM_WORLD.rank == 0:
-#     print("Read pmat from", os.path.basename(filename))
+write_pmat(pmat_write_matrix, filename)
 
 
-### Test ###############################
-datafile = os.path.join(data_dir, "pmat.dat")
-pmat_matrix_read_in = read_pmat(datafile)
+if MPI.COMM_WORLD.rank == 0:
+    print("Wrote pmat to", os.path.basename(filename))
 
-numpy_matrix_read_in = pmat_matrix.get_full()
-if not np.allclose(numpy_matrix_read_in, numpy_matrix):
+## Read pmat back in ##############
+
+pmat_read_matrix = read_pmat(filename)
+# pmat_read_matrix.print_pretty("read_matrix", as_type="i")
+
+
+if not np.allclose(pmat_read_matrix.get_full(), numpy_matrix):
+    avg_diff = np.mean(np.abs(pmat_write_matrix.get_full() - numpy_matrix))
+
     if MPI.COMM_WORLD.rank == 0:
-        avg_diff = np.mean(np.abs(numpy_matrix_read_in - numpy_matrix))
         print(f"\033[92mMatrices are not equal! Average difference: {avg_diff}\033[0m")
 else:
     if MPI.COMM_WORLD.rank == 0:
-        print("Successfully read pmat from", os.path.basename(datafile))
+        print("pmat file read and write ...\033[91mpassed\033[0m")

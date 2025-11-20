@@ -81,7 +81,6 @@ def test(n, k, m, dtype=np.double):
 
     A = pmat.from_numpy(A_mat)
 
-
     ################################################################
     # Non-Element-wise operations
 
