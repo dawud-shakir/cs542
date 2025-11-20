@@ -1,4 +1,5 @@
 from hmac import new
+from math import ceil
 import warnings
 import numpy as np
 np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
@@ -273,8 +274,8 @@ class pmat:
         self.rank = pmat.grid_comm.Get_rank()
         self.coords = pmat.grid_comm.Get_coords(self.rank)
 
-        self.n_loc = np.ceil(self.n / Pr).astype(int)
-        self.m_loc = np.ceil(self.m / Pc).astype(int)
+        self.n_loc = ceil(self.n / Pr)
+        self.m_loc = ceil(self.m / Pc) 
         self._local_shape = (self.n_loc, self.m_loc)
 
         # Padding if n or m are not evenly divisible by Pr or Pc
@@ -338,23 +339,29 @@ class pmat:
         # Note: In extents' initialization, if the column size of a block is zero, so is its row size, and vice versa.
 
         grid = self.grid_comm
-        coords = self.coords
+
+        ######################################################################### Row and Column subcommunicators for non-empty blocks
+        ########################################################################
         non_empty = []
-        row_extents = self.extent[coords[0]]
+        row_extents = self.extent[self.coords[0]][:]
         for j in range(grid.dims[1]):   # by cols
             if row_extents[j][1] > 0:
-                non_empty.append(grid.Get_cart_rank((coords[0], j)))
+                non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
 
         group = grid.Get_group()
         row_group = group.Incl(non_empty)
-        row_comm = grid.Create(row_group)
+        self.row_comm = grid.Create(row_group)
 
-        if row_comm != MPI.COMM_NULL and len(non_empty) > 0:
-            dims = [1, len(non_empty)]
-            periods = [True, True]
-            self.subgrid = row_comm.Create_cart(dims, periods, reorder=True)
-        else:
-            self.subgrid = MPI.COMM_NULL
+        non_empty = []
+        col_extents = self.extent[:][self.coords[1]]
+        for j in range(grid.dims[0]):   # by rows
+            if col_extents[j][0] > 0:
+                non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
+
+        group = grid.Get_group()
+        col_group = group.Incl(non_empty)
+        self.col_comm = grid.Create(col_group)
+
 
  
     def copy(self):
@@ -382,33 +389,78 @@ class pmat:
         return pmat(self.n, self.m, self.local.astype(dtype))
     
     def __getitem__(self, idx):
-        # val = self.data[idx]
-        # return MyArray(val) if isinstance(val, np.ndarray) else val
-        # if pmat.grid_comm.rank == 0:
-        #     print(f"index0 ({len(idx[0])})=\n{idx[0]}\n{"*"*50}\nindex1 ({len(idx[0])})=\n{idx[1]}")
-        # exit()
-        full = self.get_full()
-        val = np.atleast_2d(full[idx])
-        # if pmat.grid_comm.rank == 0:
-        #     print(f"val.shape={val.shape}")
-        # exit()
-
-        #####
-        # Todo: Index -> pmat without going through full numpy array (shared memory?)
-        ####
-        return pmat.from_numpy(val) if isinstance(val, np.ndarray) else val
-    
-    def __setitem__(self, idx, value):
-        # i, i_rem = divmod(self.n, idx[0]) 
-        # j, j_rem = divmod(self.m, idx[1]) 
         
-        # if self.coords[0] == i and self.coords[1] == j:
-        #     pass
-        #     # print(f"Setting item on rank {self.rank} at coords {self.coords} for index {idx} with value {value}")
+        numpy_result = self.get_full()[idx]
+        
+        idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+        idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
 
-        full = self.get_full()
-        full[idx] = value
-        self.set_full(full)
+        local_values = np.array((1, 0), dtype=self.local.dtype)
+        for (global_i, global_j) in zip(idx0, idx1):
+                rank_i, block_i = divmod(global_i, self.n_loc)
+                rank_j, block_j = divmod(global_j, self.m_loc)
+                
+                if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+                    local_values = np.append(local_values, self.local[block_i, block_j])
+
+        # global_values = np.array((1, len(idx0)), dtype=self.local.dtype)
+        # self.grid_comm.Allgather(local_values, global_values)
+
+        # if not np.allclose(global_values, numpy_result):
+            # raise ValueError(f"pmat __getitem__ mismatch with numpy result\n")
+
+        return local_values
+
+    def __setitem__(self, idx, value):
+        before_loop = self.get_full()
+        before_loop[idx] = value
+
+        idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+        idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+
+        for (global_i, global_j) in zip(idx0, idx1):
+
+            rank_i, block_i = divmod(global_i, self.n_loc)
+            rank_j, block_j = divmod(global_j, self.m_loc)
+                
+            if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+                self.local[block_i, block_j] = value
+
+        if not np.allclose(self.get_full(), before_loop):
+            raise ValueError(f"pmat __setitem__ failed to set value correctly:\n")
+        
+    ############################################################################
+
+        
+        
+    # def __getitem__(self, idx):
+    #     # val = self.data[idx]
+    #     # return MyArray(val) if isinstance(val, np.ndarray) else val
+    #     # if pmat.grid_comm.rank == 0:
+    #     #     print(f"index0 ({len(idx[0])})=\n{idx[0]}\n{"*"*50}\nindex1 ({len(idx[0])})=\n{idx[1]}")
+    #     # exit()
+    #     full = self.get_full()
+    #     val = np.atleast_2d(full[idx])
+    #     # if pmat.grid_comm.rank == 0:
+    #     #     print(f"val.shape={val.shape}")
+    #     # exit()
+
+    #     #####
+    #     # Todo: Index -> pmat without going through full numpy array (shared memory?)
+    #     ####
+    #     return pmat.from_numpy(val) if isinstance(val, np.ndarray) else val
+    
+    # def __setitem__(self, idx, value):
+    #     # i, i_rem = divmod(self.n, idx[0]) 
+    #     # j, j_rem = divmod(self.m, idx[1]) 
+        
+    #     # if self.coords[0] == i and self.coords[1] == j:
+    #     #     pass
+    #     #     # print(f"Setting item on rank {self.rank} at coords {self.coords} for index {idx} with value {value}")
+
+    #     full = self.get_full()
+    #     full[idx] = value
+    #     self.set_full(full)
 
     def remove_first_column(self):
     
@@ -540,10 +592,13 @@ class pmat:
     ############################################################################
     # Arithmetic operators
     ############################################################################
-    def check_for_broadcast(A, B):
+    @staticmethod
+    def check_for_broadcast(A: 'pmat', B: 'pmat'):
         # Python broadcasting expands a smaller array (a vector) to match a larger array (a matrix)
 
+        ########################################################################
         # Scalar broadcasting
+        
         if np.isscalar(B):
             A_extent = A.extent[A.coords[0]][A.coords[1]]
             A_local = A.local[:A_extent[0], :A_extent[1]]
@@ -553,7 +608,7 @@ class pmat:
             B_extent = B.extent[B.coords[0]][B.coords[1]]
             B_local = B.local[:B_extent[0], :B_extent[1]]
 
-            return A, B_extent, (B.n, B.m)
+            return A, B_local, (B.n, B.m)
 
         
         # Operands are without padding
@@ -566,31 +621,40 @@ class pmat:
         # Output shape is a matrix
         output_shape = (max(A.n, B.n), max(A.m, B.m))
 
-        # Column vector broadcasting. Avoid broadcast if A and B are both column vectors
+        ########################################################################
+        # Row vector and column vector broadcasting. 
+        # In the process grid, a vector has empty blocks where the matrix 
+        # has non-empty blocks, so we need to broadcast its nonempty blocks
+        # downward (columns) or rightward (rows) from the root of the matrix's
+        # column and row subcommunicators.
+        
         if B.shape == (A.n, 1) and B.m != A.m:  
-            # Handle column vector as right operand
-            horz_comm = B.grid_comm.Sub([False, True])            
-            B_local_col = horz_comm.bcast(B_local, root=0)
-            return A_local, B_local_col, output_shape
+            if A.col_comm == MPI.COMM_NULL:
+                return None, None, output_shape
+            else:
+                B_local = A.col_comm.bcast(B_local, root=0)
+                return A_local, B_local, output_shape
         elif A.shape == (B.n, 1) and A.m != B.m:           
-            # Handle column vector as left operand
-            horz_comm = A.grid_comm.Sub([False, True])            
-            A_local_col = horz_comm.bcast(A_local, root=0)
-            return A_local_col, B_local, output_shape
-        
-        # Row vector broadcasting. Avoid broadcast if A and B are both row vectors
+            if A.col_comm == MPI.COMM_NULL:
+                return None, None, output_shape
+            else:
+                A_local = B.col_comm.bcast(A_local, root=0)
+                return A_local, B_local, output_shape
         elif B.shape == (1, A.m) and B.n != A.n:  
-            # Handle row vector as right operand
-            vert_comm = B.grid_comm.Sub([True, False])            
-            B_local_row = vert_comm.bcast(B_local, root=0)
-            return A_local, B_local_row, output_shape
+            if B.row_comm == MPI.COMM_NULL:
+                return None, None, output_shape
+            else:         
+                B_local = A.row_comm.bcast(B_local, root=0)
+                return A_local, B_local, output_shape
         elif A.shape == (1, B.m) and A.n != B.n:
-            # Handle row vector as left operand
-            vert_comm = A.grid_comm.Sub([True, False])            
-            A_local_row = vert_comm.bcast(A_local, root=0)
-            return A_local_row, B_local, output_shape
-        
-        # Nevermind: Both are matrices
+            if A.row_comm == MPI.COMM_NULL:
+                return None, None, output_shape
+            else:
+                A_local = B.row_comm.bcast(A_local, root=0)
+                return A_local, B_local, output_shape
+
+        #######################################################################
+        # Nevermind: Both are matrices or both are vectors of the same shape
         else:
             return A_local, B_local, output_shape
 
@@ -884,22 +948,17 @@ class pmat:
 
 
         if axis == 1:
-            subgrid = self.subgrid
-
-
             dtype = self.dtype
             coords = self.coords
             extent = self.extent[coords[0]][coords[1]]
             local = self.local[:extent[0], :extent[1]]
 
             row_sum = []
-            if subgrid != MPI.COMM_NULL:
-                row_comm = subgrid.Sub([False, True])  # rows
-
+            if self.row_comm != MPI.COMM_NULL:
                 for row in range(extent[0]):
                     # Reduce to the root of each group
                     local_sum = np.sum(local[row, :])
-                    row_sum.append(row_comm.reduce(local_sum, op=MPI.SUM, root=0))
+                    row_sum.append(self.row_comm.reduce(local_sum, op=MPI.SUM, root=0))
 
                 if self.grid_comm.coords[1] == 0:
                     row_sum = np.array([x for x in row_sum if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # row_sum is now a column vector
@@ -918,7 +977,6 @@ class pmat:
             local = self.local[:extent[0], :extent[1]]
 
             local_sum = np.sum(local)
-            print("before global sum")
                         
             global_sum = grid.allreduce(local_sum, op=MPI.SUM)
             return global_sum
@@ -931,11 +989,8 @@ class pmat:
         assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
 
         if axis == 1:
-            subgrid = self.subgrid
             
-            if subgrid != MPI.COMM_NULL:
-                horz_group = subgrid.Sub([False, True])  # rows
-
+            if self.row_comm != MPI.COMM_NULL:
                 dtype = self.dtype
                 coords = self.coords
                 extent = self.extent[coords[0]][coords[1]]
@@ -946,7 +1001,7 @@ class pmat:
                 for row in range(extent[0]):
                     # Reduce to the root of each group
                     local_max = np.max(local[row, :])
-                    row_max.append(horz_group.reduce(local_max, op=MPI.MAX, root=0))
+                    row_max.append(self.row_comm.reduce(local_max, op=MPI.MAX, root=0))
 
                 if self.grid_comm.coords[1] == 0:
                     row_max = np.array([x for x in row_max if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # maxs is now a column vector
@@ -1006,8 +1061,6 @@ class pmat:
             #     return pmat(self.n, 1, local=argmax, dtype=np.int64)
 
             #### Slightly faster to use allreduce #########################
-            subgrid = self.subgrid
-
             dtype = self.dtype
             coords = self.coords
             position = self.position[coords[0]][coords[1]]
@@ -1017,13 +1070,11 @@ class pmat:
 
             result = np.zeros((extent[0], 2), dtype=(np.int64, self.dtype))
             
-            if subgrid == MPI.COMM_NULL:
+            if self.row_comm == MPI.COMM_NULL:
                 # Return type is np.int64 for argmax
                 return pmat(self.n, 1, local=None, dtype=np.int64)
 
             else:
-                horz_comm = subgrid.Sub([False, True])  # rows
-
                 for row in range(num_rows): 
                     
                     local_max = dtype(np.max(local[row, :]))
@@ -1035,7 +1086,7 @@ class pmat:
                     recvbuf = np.array([(0.0, 0)], dtype=mpi_dtype)
 
                     # Allreduce with MAXLOC
-                    horz_comm.Allreduce([sendbuf, MPI.DOUBLE_INT], [recvbuf, MPI.DOUBLE_INT], op=MPI.MAXLOC)
+                    self.row_comm.Allreduce([sendbuf, MPI.DOUBLE_INT], [recvbuf, MPI.DOUBLE_INT], op=MPI.MAXLOC)
 
                     result[row,:] = recvbuf['index'][0]
 
