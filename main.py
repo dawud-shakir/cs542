@@ -4,6 +4,7 @@ main.py
 
 from math import e
 import numpy as np
+from sympy import total_degree
 np.random.seed(0)  # Reproducibility
 np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
 
@@ -65,11 +66,12 @@ X_test = X_test.reshape(X_test.shape[0], -1)
 y_train = y_train.astype(np.int64) 
 y_test = y_test.astype(np.int64)    
 
-print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
-print(f"Test data: {X_test.shape}, Labels: {y_test.shape}")
-print(f"Pixel value range: [{X_train.min():.3f}, {X_train.max():.3f}]")
-print(f"Training labels: {np.unique(y_train)}")
-print(f"Test labels: {np.unique(y_test)}")
+if MPI.COMM_WORLD.Get_rank() == 0:
+    print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
+    print(f"Test data: {X_test.shape}, Labels: {y_test.shape}")
+    print(f"Pixel value range: [{X_train.min():.3f}, {X_train.max():.3f}]")
+    print(f"Training labels: {np.unique(y_train)}")
+    print(f"Test labels: {np.unique(y_test)}")
 
 """ Hyperparameters """
 alpha = 1e-3
@@ -77,12 +79,20 @@ n_epochs = 5
 batch_size = 1000
 # batch_size = X_train.shape[0]
 
+# Early stopping threshold (set to None to disable)
+stop_at_accuracy = 0.99 #0.5      # 0.99
+stop_at_loss = 0.01 # 1.0          # 0.01
+stop_at_epoch = None        # 5
+stop_at_batch = None        # 272
+
 """ Network"""
+scale = 1 # scale factor for hidden layer size (64 shows good results while comparing serial to parallel)
+
 # 28*28 = 784 input features
-fc1 = nn.Parallel_Layer(input_size=28*28,  output_size=64); fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc2 = nn.Parallel_Layer(input_size=64, output_size=64); fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc3 = nn.Parallel_Layer(input_size=64, output_size=64); fc3.phi, fc3.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc4 = nn.Parallel_Layer(input_size=64, output_size=10); fc4.phi= nn.log_softmax 
+fc1 = nn.Parallel_Layer(input_size=28*28,  output_size=int(64*scale)); fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
+fc2 = nn.Parallel_Layer(input_size=int(64*scale), output_size=int(64*scale)); fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
+fc3 = nn.Parallel_Layer(input_size=int(64*scale), output_size=int(64*scale)); fc3.phi, fc3.phi_prime = nn.ReLU, nn.ReLU_derivative
+fc4 = nn.Parallel_Layer(input_size=int(64*scale), output_size=10); fc4.phi= nn.log_softmax 
 
 """ Testing """
 
@@ -134,8 +144,51 @@ def main():
 
     losses, accuracies = [], []
 
-    for epoch in range(n_epochs):
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        print("*"*100)
+        print("Starting training...")
+        
+        print(f"Hidden layer scaling: {scale:.1f}")
+        print(f"Batch size: {batch_size}, Total batches per epoch: {n_batches}")
+        print("Early stopping conditions:"
+              f" accuracy >= {stop_at_accuracy},"
+              f" loss <= {stop_at_loss},"
+              f" epoch >= {stop_at_epoch},"
+              f" batch >= {stop_at_batch}"
+            )
+        
+        print("Learning rate (alpha):", alpha)
+        print("Total epochs:", n_epochs)
+        print("Number of processes:", MPI.COMM_WORLD.Get_size())
+        print("MPI Wtime accuracy: ", MPI.Wtick())
 
+
+
+
+    start_time = MPI.Wtime()
+    
+    total_batches = 0
+
+    for epoch in range(n_epochs):
+        
+        # Check early stopping conditions 
+
+        last_acc = accuracies[-1] if accuracies else None
+        last_loss = losses[-1] if losses else None
+        
+        
+        if (stop_at_accuracy is not None and last_acc is not None and last_acc >= stop_at_accuracy):
+            print(f"Stopping early at epoch {epoch+1} due to reaching accuracy threshold: {last_acc:.4f} >= {stop_at_accuracy}")
+            break
+        if (stop_at_loss is not None and last_loss is not None and last_loss <= stop_at_loss):
+            print(f"Stopping early at epoch {epoch+1} due to reaching loss threshold: {last_loss:.4f} <= {stop_at_loss}")
+            break
+        if (stop_at_epoch is not None and epoch >= stop_at_epoch):
+            print(f"Stopping early at epoch {epoch+1} due to reaching epoch threshold: {epoch+1} >= {stop_at_epoch}")
+            break
+        if (stop_at_batch is not None and total_batches >= stop_at_batch):
+            print(f"Stopping early at batch {len(losses)} due to reaching batch threshold: {len(losses)} >= {stop_at_batch}")
+            break
 
         # Shuffle data
         indicies = np.random.permutation(np.arange(X_train.shape[0]))  
@@ -203,7 +256,6 @@ def main():
             ####################################################################
             # Backward pass - start with combined log_softmax + NLL derivative
             ####################################################################
-
             ######### patmat version ##########
             p_dL_dlogits = nn.nll_loss_derivative(p_log_probs, Y)  # (batch_size, 10)
             
@@ -241,12 +293,16 @@ def main():
             losses.append(loss)
             accuracies.append(acc)
             
-            print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()}")
+            total_batches += n_batches
+            elapsed_time = MPI.Wtime() - start_time
+
+            print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()}, total time: {elapsed_time:.5f} sec")
 
         ### Original version ##########
         # print(f"#### Epoch {epoch+1} test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
 
-
+    total_time = MPI.Wtime() - start_time
+    print(f"Total time: {total_time:.5f} sec")
     print(f"Final test accuracy: {acc:.4f}")
 
 
