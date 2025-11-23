@@ -424,43 +424,73 @@ class pmat:
         self.block_extent = extent[self.coords[0]][self.coords[1]]
         self.block_offset = offsets[self.coords[0]][self.coords[1]]
 
+        # Count number of non-empty blocks in each process dimension
         nonempty_in_row = sum(1 for i in range(Pr) if extent[i][0][0] > 0)
         nonempty_in_col = sum(1 for j in range(Pc) if extent[0][j][1] > 0)
 
 
-        self.nonempty_shape = (nonempty_in_row, nonempty_in_col)
+        self.nonempty_processes = (nonempty_in_row, nonempty_in_col)
 
 
         ### Create subcommunicator for non-empty blocks only
-            
-        # Note: In extents' initialization, if the column size of a block is zero, so is its row size, and vice versa.
-
+        coords = self.coords
         grid = self.grid_comm
 
-        ######################################################################### Row and Column subcommunicators for non-empty blocks
-        ########################################################################
-        non_empty = []
-        row_extents = self.extents[self.coords[0]][:]
-        for j in range(grid.dims[1]):   # by cols
-            if row_extents[j][1] > 0:
-                non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
+        # Decide if THIS rank’s block is non-empty
+        # row_extents = self.extents[coords[0]]    # extents for my row
+        # has_work    = int(row_extents[coords[1]][1] > 0)  # 1 if non-empty else 0
+        extent   = self.extents[coords[0]][coords[1]]
+        has_work = int(extent[0] > 0 and extent[1] > 0)  # check “non-empty”
 
-        group = grid.Get_group()
-        row_group = group.Incl(non_empty)
-        self.row_comm = grid.Create(row_group)
+        row_all = grid.Sub([False, True])   # all ranks in my row
+        col_all = grid.Sub([True,  False])  # all ranks in my column
 
-        non_empty = []
-        col_extents = self.extents[:][self.coords[1]]
-        for j in range(grid.dims[0]):   # by rows
-            if col_extents[j][0] > 0:
-                non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
+        # Use MPI.UNDEFINED to drop ranks with no work
+        row_color = 0 if has_work else MPI.UNDEFINED
+        col_color = 0 if has_work else MPI.UNDEFINED
 
-        group = grid.Get_group()
-        col_group = group.Incl(non_empty)
-        self.col_comm = grid.Create(col_group)
+        self.row_comm = row_all.Split(color=row_color, key=coords[1])
+        self.col_comm = col_all.Split(color=col_color, key=coords[0])
+
+        row_all.Free()
+        col_all.Free()
 
 
- 
+        # Note: In extents' initialization, if the column size of a block is zero, so is its row size, and vice versa.
+
+        # grid = self.grid_comm
+
+        # ######################################################################### Row and Column subcommunicators for non-empty blocks
+        # ########################################################################
+        # non_empty = []
+        # row_extents = self.extents[self.coords[0]][:]
+        # for j in range(grid.dims[1]):   # by cols
+        #     if row_extents[j][1] > 0:
+        #         non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
+
+        # group = grid.Get_group()
+        # row_group = group.Incl(non_empty)
+        # self.row_comm = grid.Create(row_group)
+
+        # non_empty = []
+        # col_extents = self.extents[:][self.coords[1]]
+        # for j in range(grid.dims[0]):   # by rows
+        #     if col_extents[j][0] > 0:
+        #         non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
+
+        # group = grid.Get_group()
+        # col_group = group.Incl(non_empty)
+        # self.col_comm = grid.Create(col_group)
+
+    def __del__(self):
+     # Destructor: free communicators safely
+        for comm in (getattr(self, 'row_comm', None), getattr(self, 'col_comm', None)):
+            if comm is not None and comm != MPI.COMM_NULL:
+                try:
+                    comm.Free()
+                except MPI.Exception:
+                    # It might already be freed or invalid during MPI_Finalize
+                    pass
     def copy(self):
         # Deep copy
         new_pmat = pmat(self.n, self.m, self.local.copy(), dtype=self.local.dtype)
@@ -733,29 +763,57 @@ class pmat:
         # column and row subcommunicators.
         
         if B.shape == (A.n, 1) and B.m != A.m:  
-            if A.col_comm == MPI.COMM_NULL:
-                return A_local, A_local, output_shape
-            else:
-                B_local = A.col_comm.bcast(B_local, root=0)
-                return A_local, B_local, output_shape
-        elif A.shape == (B.n, 1) and A.m != B.m:           
-            if B.col_comm == MPI.COMM_NULL:
-                return B_local, B_local, output_shape
-            else:
-                A_local = B.col_comm.bcast(A_local, root=0)
-                return A_local, B_local, output_shape
-        elif B.shape == (1, A.m) and B.n != A.n:  
             if A.row_comm == MPI.COMM_NULL:
                 return A_local, A_local, output_shape
-            else:         
+            else:
                 B_local = A.row_comm.bcast(B_local, root=0)
                 return A_local, B_local, output_shape
-        elif A.shape == (1, B.m) and A.n != B.n:
+        elif A.shape == (B.n, 1) and A.m != B.m:           
             if B.row_comm == MPI.COMM_NULL:
                 return B_local, B_local, output_shape
             else:
                 A_local = B.row_comm.bcast(A_local, root=0)
                 return A_local, B_local, output_shape
+        elif B.shape == (1, A.m) and B.n != A.n:  
+            if A.col_comm == MPI.COMM_NULL:
+                return A_local, A_local, output_shape
+            else:         
+                B_local = A.col_comm.bcast(B_local, root=0)
+                return A_local, B_local, output_shape
+        elif A.shape == (1, B.m) and A.n != B.n:
+            if B.col_comm == MPI.COMM_NULL:
+                return B_local, B_local, output_shape
+            else:
+                A_local = B.col_comm.bcast(A_local, root=0)
+                return A_local, B_local, output_shape
+            
+            
+        
+        # Originally: col_comm and row_comm switched
+        # if B.shape == (A.n, 1) and B.m != A.m:  
+        #   if A.col_comm == MPI.COMM_NULL:
+        #         return A_local, A_local, output_shape
+        #     else:
+        #         B_local = A.row_comm.bcast(B_local, root=0)
+        #         return A_local, B_local, output_shape
+        # elif A.shape == (B.n, 1) and A.m != B.m:           
+        #     if B.col_comm == MPI.COMM_NULL:
+        #         return B_local, B_local, output_shape
+        #     else:
+        #         A_local = B.col_comm.bcast(A_local, root=0)
+        #         return A_local, B_local, output_shape
+        # elif B.shape == (1, A.m) and B.n != A.n:  
+        #     if A.row_comm == MPI.COMM_NULL:
+        #         return A_local, A_local, output_shape
+        #     else:         
+        #         B_local = A.row_comm.bcast(B_local, root=0)
+        #         return A_local, B_local, output_shape
+        # elif A.shape == (1, B.m) and A.n != B.n:
+        #     if B.row_comm == MPI.COMM_NULL:
+        #         return B_local, B_local, output_shape
+        #     else:
+        #         A_local = B.row_comm.bcast(A_local, root=0)
+        #         return A_local, B_local, output_shape
 
         #######################################################################
         # Nevermind: Both are matrices or both are vectors of the same shape
@@ -764,101 +822,60 @@ class pmat:
 
 
     def __gt__(self, other):
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
 
-        return pmat(output_shape[0], output_shape[1], np.greater(left_operand,  right_operand))
+        return pmat(output_shape[0], output_shape[1], np.greater(A,  B))
 
         # return pmat(self.n, self.m, self.local > other)
 
     def __eq__(self, other):
 
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
 
-        return pmat(output_shape[0], output_shape[1], np.equal(left_operand,  right_operand), dtype=np.bool_)
+        return pmat(output_shape[0], output_shape[1], np.equal(A,  B), dtype=np.bool_)
 
         # return pmat(self.n, self.m, self.local > other)
     
-    def __add__(self, other):
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, self.local + other)
-        # else:
-            
-        #     
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
-        
-        return pmat(output_shape[0], output_shape[1], np.add(left_operand,  right_operand))
-        # return pmat(self.n, self.m, self.local + other.local)
+    def __add__(self, other): 
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
 
+        return pmat(output_shape[0], output_shape[1], np.add(A,  B))
 
     def __sub__(self, other):     
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
         
-        return pmat(output_shape[0], output_shape[1], np.subtract(left_operand, right_operand))
+        return pmat(output_shape[0], output_shape[1], np.subtract(A, B))
 
 
     def __mul__(self, other):
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
         
-        return pmat(output_shape[0], output_shape[1], np.multiply(left_operand, right_operand))
-        
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, self.local * other)
-        # else:
-        #     return pmat(self.n, self.m, self.local * other.local)
+        return pmat(output_shape[0], output_shape[1], np.multiply(A, B))
     
     def __rmul__(self, other):
-        # Handle scalar * pmat (right multiplication)
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
         
-        return pmat(output_shape[0], output_shape[1], np.multiply( right_operand, left_operand))
-        
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, other * self.local)
-        # else:
-        #     return NotImplemented
+        return pmat(output_shape[0], output_shape[1], np.multiply( B, A))
         
     def __truediv__(self, other):
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
         
-        return pmat(output_shape[0], output_shape[1], np.true_divide(left_operand, right_operand))
-
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, self.local / other)
-        # else:
-        #     return pmat(self.n, self.m, self.local / other.local)
+        return pmat(output_shape[0], output_shape[1], np.true_divide(A, B))
     
     def __rdiv__(self, other):
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
 
-        return pmat(output_shape[0], output_shape[1], np.true_divide(left_operand, right_operand))
-
-        # Handle scalar / pmat (right division)
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, other / self.local)
-        # else:
-        #     return NotImplemented
+        return pmat(output_shape[0], output_shape[1], np.true_divide(A, B))
     
     def __rtruediv__(self, other):
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
 
-        return pmat(output_shape[0], output_shape[1], np.true_divide(right_operand, left_operand))
-
-        # Handle scalar / pmat (right true division for Python 3)
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, other / self.local)
-        # else:
-        #     return NotImplemented
+        return pmat(output_shape[0], output_shape[1], np.true_divide(B, A))
 
     def __radd__(self, other):
-        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
         
-        return pmat(output_shape[0], output_shape[1], np.add(right_operand, left_operand))
-
-        # # Handle scalar + pmat (right addition)
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, other + self.local)
-        # else:
-        #     return NotImplemented
+        return pmat(output_shape[0], output_shape[1], np.add(B, A))
     
 
     ##### failed in test.py..... ########

@@ -2,15 +2,17 @@
 main.py
 """
 
-from math import e
 import numpy as np
-from sympy import total_degree
+
 np.random.seed(0)  # Reproducibility
 np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
 
 import layer as nn
 
 import os               # for file paths
+import psutil         # for memory usage
+proc = psutil.Process(os.getpid())
+
 
 import numpy as np
 import struct           # for unpacking binary files
@@ -80,8 +82,8 @@ batch_size = 1000
 # batch_size = X_train.shape[0]
 
 # Early stopping threshold (set to None to disable)
-stop_at_accuracy = 0.99 #0.5      # 0.99
-stop_at_loss = 0.01 # 1.0          # 0.01
+stop_at_accuracy = None #0.99 #0.5      # 0.99
+stop_at_loss = None #0.01 # 1.0          # 0.01
 stop_at_epoch = None        # 5
 stop_at_batch = None        # 272
 
@@ -296,7 +298,8 @@ def main():
             total_batches += n_batches
             elapsed_time = MPI.Wtime() - start_time
 
-            print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()}, total time: {elapsed_time:.5f} sec")
+
+            print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()}, total time: {elapsed_time:.5f} sec, memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB")
 
         ### Original version ##########
         # print(f"#### Epoch {epoch+1} test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")

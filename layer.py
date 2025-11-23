@@ -1,8 +1,6 @@
 """
 layer.py
 """
-from math import log
-from venv import create
 from mpi4py import MPI
 from pmat import pmat, create_grid_comm
 
