@@ -95,15 +95,15 @@ def load_data_files():
     return p_X_train, p_y_train, p_X_test, p_y_test
 
 
-# X_train, y_train, X_test, y_test = read_mnist_data()
+X_train, y_train, X_test, y_test = read_mnist_data()
 
 # Uncomment to write data files once
-write_data_files()
-if MPI.COMM_WORLD.Get_rank() == 0:
-    print("Wrote data files."); 
+# write_data_files()
+# if MPI.COMM_WORLD.Get_rank() == 0:
+#     print("Wrote data files."); 
 
-p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
-exit()
+# p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
+# exit()
 
 
 if MPI.COMM_WORLD.Get_rank() == 0:
