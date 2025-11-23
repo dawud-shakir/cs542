@@ -44,29 +44,67 @@ def load_labels(filename):
         labels = np.frombuffer(f.read(), dtype=np.uint8)
         return labels
 
+def read_mnist_data():
+    """ Load MNIST data from original ubyte files """
+    # (60000, 28, 28)
+    X_train = load_images(os.path.join(os.path.dirname(__file__), "train-images.idx3-ubyte"))
+    # (60000,)
+    y_train = load_labels(os.path.join(os.path.dirname(__file__), "train-labels.idx1-ubyte"))
+    # (10000, 28, 28)
+    X_test  = load_images(os.path.join(os.path.dirname(__file__), "t10k-images.idx3-ubyte"))
+    # (10000,)
+    y_test  = load_labels(os.path.join(os.path.dirname(__file__), "t10k-labels.idx1-ubyte"))
+
+    """ Preprocessing """
+    # Flatten to 2D: (60000, 28, 28) → (60000, 784)
+    X_train = X_train.reshape(X_train.shape[0], -1)
+
+    # Flatten to 2D: (10000, 28, 28) → (10000, 784)
+    X_test = X_test.reshape(X_test.shape[0], -1)  
+
+    # Normalize pixel by grayscale max value
+    # X_train = (X_train.astype(np.float32) / 255.0)  
+    # X_test = (X_test.astype(np.float32) / 255.0)
+
+    # Convert test labels to int64 for compatibility
+    y_train = y_train.astype(np.int64) 
+    y_test = y_test.astype(np.int64)    
+    return X_train, y_train, X_test, y_test
+
+def write_data_files():
+##### Do this once: Write data as files #####
+    X_train, y_train, X_test, y_test = read_mnist_data()
+
+    p_X_train = pmat.from_numpy(X_train)
+    p_y_train = pmat.from_numpy(y_train.reshape(-1,1))  # make 2d
+    p_X_test = pmat.from_numpy(X_test)
+    p_y_test = pmat.from_numpy(y_test.reshape(-1,1))    # make
+
+    p_X_train.to_file("X_train.dat")
+    p_y_train.to_file("y_train.dat")
+    p_X_test.to_file("X_test.dat")
+    p_y_test.to_file("y_test.dat")
+
+def load_data_files():
+#### Load from files #####
+    p_X_train = pmat.from_file("X_train.dat")
+    p_y_train = pmat.from_file("y_train.dat")
+    p_X_test = pmat.from_file("X_test.dat")
+    p_y_test = pmat.from_file("y_test.dat")
+
+    return p_X_train, p_y_train, p_X_test, p_y_test
 
 
-# (60000, 28, 28)
-X_train = load_images(os.path.join(os.path.dirname(__file__), "train-images.idx3-ubyte"))
-# (60000,)
-y_train = load_labels(os.path.join(os.path.dirname(__file__), "train-labels.idx1-ubyte"))
-# (10000, 28, 28)
-X_test  = load_images(os.path.join(os.path.dirname(__file__), "t10k-images.idx3-ubyte"))
-# (10000,)
-y_test  = load_labels(os.path.join(os.path.dirname(__file__), "t10k-labels.idx1-ubyte"))
+# X_train, y_train, X_test, y_test = read_mnist_data()
 
-""" Preprocessing """
-# Flatten images (60000, 28, 28) → (60000, 784)
-X_train = X_train.reshape(X_train.shape[0], -1)
-X_test = X_test.reshape(X_test.shape[0], -1)  
+# Uncomment to write data files once
+write_data_files()
+if MPI.COMM_WORLD.Get_rank() == 0:
+    print("Wrote data files."); 
 
-# Normalize pixel by grayscale max value
-# X_train = (X_train.astype(np.float32) / 255.0)  
-# X_test = (X_test.astype(np.float32) / 255.0)
+p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
+exit()
 
-# Convert test labels to int64 for compatibility
-y_train = y_train.astype(np.int64) 
-y_test = y_test.astype(np.int64)    
 
 if MPI.COMM_WORLD.Get_rank() == 0:
     print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
@@ -299,7 +337,9 @@ def main():
             elapsed_time = MPI.Wtime() - start_time
 
             if MPI.COMM_WORLD.Get_rank() == 0:
-                print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()} of {MPI.COMM_WORLD.Get_size()}, total time: {elapsed_time:.5f} sec, memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB")
+                #  RSS = Resident Set Size, a measure of the physical memory (RAM) currently used by a process. It includes the code, data, and stack segments that are resident in memory, excluding swapped-out pages.
+
+                print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()} of {MPI.COMM_WORLD.Get_size()}, Per Process Memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB, Total Time: {elapsed_time:.5f} sec")
 
         ### Original version ##########
         # print(f"#### Epoch {epoch+1} test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
