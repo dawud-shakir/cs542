@@ -1,6 +1,6 @@
-from hmac import new
 from math import ceil
 import warnings
+import os # for file paths
 import numpy as np
 np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
 
@@ -83,11 +83,14 @@ class pmat:
     ############################################################################
     # File I/O
     ############################################################################
-    def to_file(self, filename: str):
+    def to_file(self, filename: str, prefix_current_directory=True) -> int:
         comm = MPI.COMM_WORLD
+    
+        filepath = os.path.join(os.path.dirname(__file__), filename) if prefix_current_directory else filename
+
         # Open the file
         amode = MPI.MODE_CREATE | MPI.MODE_WRONLY
-        fh = MPI.File.Open(comm, filename, amode)
+        fh = MPI.File.Open(comm, filepath, amode)
 
         data_offset = 0
 
@@ -125,16 +128,24 @@ class pmat:
             file_offset = data_offset + (global_row * self.m + col_offset) * np.dtype(self.dtype).itemsize
             fh.Write_at(file_offset, self.local[i, :local_cols].tobytes())
 
+       
+
+        file_size = fh.Get_size()
         fh.Close()
+        return file_size
+
 
     @staticmethod
-    def from_numpy(filename: str) -> 'pmat':
+    def from_file(filename: str, prefix_current_directory=True) -> tuple['pmat', int]:
         comm = MPI.COMM_WORLD
+
+        filepath = os.path.join(os.path.dirname(__file__), filename) if prefix_current_directory else filename
+
         # Open the file
         amode = MPI.MODE_RDONLY
-        fh = MPI.File.Open(comm, filename, amode)
+        fh = MPI.File.Open(comm, filepath, amode)
 
-        # file_size = fh.Get_size()
+        file_size = fh.Get_size()
 
         header = np.empty(2, dtype=np.int64)
 
@@ -168,7 +179,7 @@ class pmat:
             pmat_matrix.local[i, :local_cols] = np.frombuffer(buffer, dtype=dtype)
 
         fh.Close()
-        return pmat_matrix
+        return (pmat_matrix, file_size)
 
 
     ############################################################################
@@ -404,6 +415,7 @@ class pmat:
             m_loc_extent += [y_rem]
         m_loc_extent += [0] * (Pc - len(m_loc_extent))  # pad with zeros if needed
 
+        # If the extent's row size -- or -- column size is zero, the block is empty
         extent = [[(0, 0) if a == 0 or b == 0 else (a, b) for b in m_loc_extent] for a in n_loc_extent]
 
         # extent = [[(a, b) for b in m_loc_extent] for a in n_loc_extent]
@@ -431,16 +443,13 @@ class pmat:
 
         self.nonempty_processes = (nonempty_in_row, nonempty_in_col)
 
-
         ### Create subcommunicator for non-empty blocks only
         coords = self.coords
         grid = self.grid_comm
 
         # Decide if THIS rank’s block is non-empty
-        # row_extents = self.extents[coords[0]]    # extents for my row
-        # has_work    = int(row_extents[coords[1]][1] > 0)  # 1 if non-empty else 0
         extent   = self.extents[coords[0]][coords[1]]
-        has_work = int(extent[0] > 0 and extent[1] > 0)  # check “non-empty”
+        has_work = int(extent[0] > 0 and extent[1] > 0)  # 1 if non-empty
 
         row_all = grid.Sub([False, True])   # all ranks in my row
         col_all = grid.Sub([True,  False])  # all ranks in my column
@@ -454,33 +463,6 @@ class pmat:
 
         row_all.Free()
         col_all.Free()
-
-
-        # Note: In extents' initialization, if the column size of a block is zero, so is its row size, and vice versa.
-
-        # grid = self.grid_comm
-
-        # ######################################################################### Row and Column subcommunicators for non-empty blocks
-        # ########################################################################
-        # non_empty = []
-        # row_extents = self.extents[self.coords[0]][:]
-        # for j in range(grid.dims[1]):   # by cols
-        #     if row_extents[j][1] > 0:
-        #         non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
-
-        # group = grid.Get_group()
-        # row_group = group.Incl(non_empty)
-        # self.row_comm = grid.Create(row_group)
-
-        # non_empty = []
-        # col_extents = self.extents[:][self.coords[1]]
-        # for j in range(grid.dims[0]):   # by rows
-        #     if col_extents[j][0] > 0:
-        #         non_empty.append(grid.Get_cart_rank((self.coords[0], j)))
-
-        # group = grid.Get_group()
-        # col_group = group.Incl(non_empty)
-        # self.col_comm = grid.Create(col_group)
 
     def __del__(self):
      # Destructor: free communicators safely
@@ -516,23 +498,23 @@ class pmat:
         return pmat(self.n, self.m, self.local.astype(dtype))
     
     def __getitem__(self, idx):
-        
+        #### Keep as get_full for now ... optimize later ####
         numpy_result = self.get_full()[idx]
+        return numpy_result
         
-        
-        idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
-        idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
-        assert(len(idx0) == len(idx1))
+        # idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+        # idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+        # assert(len(idx0) == len(idx1))
 
-        local_values = []
-        for (global_i, global_j) in zip(idx0, idx1):
-                rank_i, block_i = divmod(global_i, self.n_loc)
-                rank_j, block_j = divmod(global_j, self.m_loc)
+        # local_values = []
+        # for (global_i, global_j) in zip(idx0, idx1):
+        #         rank_i, block_i = divmod(global_i, self.n_loc)
+        #         rank_j, block_j = divmod(global_j, self.m_loc)
                 
-                if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
-                    local_values.append(self.local[block_i, block_j])
+        #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+        #             local_values.append(self.local[block_i, block_j])
 
-        local_values = np.array(local_values, dtype=self.local.dtype)
+        # local_values = np.array(local_values, dtype=self.local.dtype)
 
         # padded = np.full(len(idx0), np.nan, dtype=self.local.dtype)
         # padded[:len(local_values)] = local_values
