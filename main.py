@@ -19,7 +19,7 @@ import struct           # for unpacking binary files
 
 """ MPI """
 from mpi4py import MPI
-from pmat import pmat
+from pmat import pmat, print_ordered_by_rank
 
 
 """ Data """
@@ -298,15 +298,17 @@ def main():
             total_batches += n_batches
             elapsed_time = MPI.Wtime() - start_time
 
-
-            print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()}, total time: {elapsed_time:.5f} sec, memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB")
+            if MPI.COMM_WORLD.Get_rank() == 0:
+                print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()} of {MPI.COMM_WORLD.Get_size()}, total time: {elapsed_time:.5f} sec, memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB")
 
         ### Original version ##########
         # print(f"#### Epoch {epoch+1} test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
 
     total_time = MPI.Wtime() - start_time
-    print(f"Total time: {total_time:.5f} sec")
-    print(f"Final test accuracy: {acc:.4f}")
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        print(f"Total time: {total_time:.5f} sec")
+        print(f"Final test accuracy: {acc:.4f}")
 
 
     """ Plot """
