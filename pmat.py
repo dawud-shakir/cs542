@@ -1047,7 +1047,7 @@ class pmat:
     def psum(self, *args, **kwargs):
         axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
 
-        # assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+        # assert axis == 1, f'Only axis=1 (row-wise) is supported for psum'
 
 
         if axis == 1:
@@ -1086,10 +1086,42 @@ class pmat:
         else:
             raise NotImplementedError("psum axis=0 not implemented yet")
 
-    def pmax(self, *args, **kwargs):
+    def pmin(self, *args, **kwargs):
         axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
 
-        assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+        if axis == 1:
+            
+            if self.row_comm != MPI.COMM_NULL:
+                dtype = self.dtype
+                coords = self.coords
+                extent = self.extents[coords[0]][coords[1]]
+                local = self.local[:extent[0], :extent[1]]
+
+                row_max = []
+
+                for row in range(extent[0]):
+                    # Reduce to the root of each group
+                    local_max = np.max(local[row, :])
+                    row_max.append(self.row_comm.reduce(local_max, op=MPI.MIN, root=0))
+
+                if self.grid_comm.coords[1] == 0:
+                    row_max = np.array([x for x in row_max if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # maxs is now a column vector
+                else:
+                    row_max = None
+            else:
+                row_max = None
+
+            return pmat(self.n, 1, row_max)
+    
+        elif axis is None:
+            # Global min
+            global_min = self.grid_comm.allreduce(np.min(self.local), op=MPI.MIN)
+            return global_min      # return scalar value (not pmat)
+        else:
+            raise ValueError(f"Invalid axis {axis} for pmin")
+        
+    def pmax(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
 
         if axis == 1:
             
@@ -1115,6 +1147,12 @@ class pmat:
 
             return pmat(self.n, 1, row_max)
     
+        elif axis is None:
+            # Global max
+            global_max = self.grid_comm.allreduce(np.max(self.local), op=MPI.MAX)
+            return global_max      # return scalar value (not pmat)
+        else:
+            raise ValueError(f"Invalid axis {axis} for pmax")
     
     def pargmax(self, *args, **kwargs):
         axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
