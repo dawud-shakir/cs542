@@ -22,6 +22,8 @@ from mpi4py import MPI
 from pmat import pmat, print_ordered_by_rank
 
 
+print("Running with MPI processes")
+
 """ Data """
 def load_images(filename):
     with open(filename, 'rb') as f:
@@ -143,17 +145,35 @@ def load_data_files():
     
     rank = MPI.COMM_WORLD.Get_rank()
     if rank == 0: print("Loading data files...")
-    p_X_train, nbytes = pmat.from_file("X_train.dat")
-    if rank == 0: print(f"Loaded X_train.dat ({nbytes / 1024**2:.2f} MB)")
-
-    p_y_train, nbytes = pmat.from_file("y_train.dat")
-    if rank == 0: print(f"Loaded y_train.dat ({nbytes / 1024**2:.2f} MB)")
     
-    p_X_test, nbytes = pmat.from_file("X_test.dat")
-    if rank == 0: print(f"Loaded X_test.dat ({nbytes / 1024**2:.2f} MB)")
+    t0 = MPI.Wtime()
+    p_X_train, nbytes = pmat.from_file("X_train.dat")
+    t1 = MPI.Wtime()
+    ttot = t1 - t0
+    time = MPI.COMM_WORLD.reduce(ttot, op=MPI.MAX, root=0)
 
+    if rank == 0: print(f"Loaded X_train.dat ({nbytes / 1024**2:.2f} MB) in {time:.2f} sec")
+
+    t0 = MPI.Wtime()
+    p_y_train, nbytes = pmat.from_file("y_train.dat")
+    t1 = MPI.Wtime()
+    ttot = t1 - t0
+    time = MPI.COMM_WORLD.reduce(ttot, op=MPI.MAX, root=0)
+    if rank == 0: print(f"Loaded y_train.dat ({nbytes / 1024**2:.2f} MB) in {time:.2f} sec")
+    
+    t0 = MPI.Wtime()
+    p_X_test, nbytes = pmat.from_file("X_test.dat")
+    t1 = MPI.Wtime()
+    ttot = t1 - t0
+    time = MPI.COMM_WORLD.reduce(ttot, op=MPI.MAX, root=0)
+    if rank == 0: print(f"Loaded X_test.dat ({nbytes / 1024**2:.2f} MB) in {time:.2f} sec")
+
+    t0 = MPI.Wtime()
     p_y_test, nbytes = pmat.from_file("y_test.dat")
-    if rank == 0: print(f"Loaded y_test.dat ({nbytes / 1024**2:.2f} MB)")
+    t1 = MPI.Wtime()
+    ttot = t1 - t0
+    time = MPI.COMM_WORLD.reduce(ttot, op=MPI.MAX, root=0)
+    if rank == 0: print(f"Loaded y_test.dat ({nbytes / 1024**2:.2f} MB) in {time:.2f} sec")
 
     return p_X_train, p_y_train, p_X_test, p_y_test
 

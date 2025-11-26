@@ -42,14 +42,18 @@ if rank == 0:
     print("Starting memory usage report...")
 
 
-print_ordered_by_rank(f"rank {rank}, memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB")
 
 t0 = MPI.Wtime()
+
+
+rank_start_memory = proc.memory_info().rss
 
 p_X_train, size_X_train = pmat.from_file('X_train.dat')
 p_y_train, size_y_train = pmat.from_file('y_train.dat')
 p_X_test, size_X_test = pmat.from_file('X_test.dat')
 p_y_test, size_y_test = pmat.from_file('y_test.dat')
+
+rank_end_memory = proc.memory_info().rss
 
 t1 = MPI.Wtime()
 total = t1 - t0
@@ -58,14 +62,14 @@ comm.reduce(total, op=MPI.MAX, root=0)
 
 total_size = size_X_train + size_y_train + size_X_test + size_y_test
 
-comm.Barrier()
+# comm.Barrier()
 
 if rank == 0:
     print("After loading data memory usage report...")
 
-print_ordered_by_rank(f"rank {rank}, memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB")
+print_ordered_by_rank(f"rank {rank}, memory (RSS): +{(rank_end_memory - rank_start_memory) / 1024**2:.2f} MB")
 
-comm.Barrier()
+# comm.Barrier()
 
 if rank == 0:
     print(f"X_train shape: {p_X_train.shape}, y_train shape: {p_y_train.shape}")
