@@ -8,7 +8,11 @@ from mpi4py import MPI
 
 def dtype_to_mpi(dtype):
     dtype = np.dtype(dtype)
-    if dtype == np.int32:
+    if dtype == np.bool_:
+        return MPI.BOOL # Or MPI.C_BOOL
+    elif dtype == np.uint8:
+        return MPI.UNSIGNED_CHAR
+    elif dtype == np.int32:
         return MPI.INT
     elif dtype == np.int64:
         return MPI.LONG
@@ -31,11 +35,11 @@ def create_grid_comm():
     periods = [True, True]
     return comm.Create_cart(dims, periods, reorder=True)
 
-def print_matrix(my_list, name=""):
+def print_matrix(title: str, my_list: list):
     rows = len(my_list)
     cols = len(my_list[0])
-    if name != "":
-        print(f"{name}:")
+   
+    print(f"{title}:")
     for i in range(rows):
         for j in range(cols):
             if pmat.grid_comm.rank == 0:
@@ -74,6 +78,42 @@ def set_text_color(code):
 
 def reset_text_color():
     print("\033[0m", end="", flush=True)
+
+def normalize_index(idx):
+    """
+    Normalize an index to a form NumPy can handle for advanced indexing.
+    - Converts arrays/lists to NumPy int arrays.
+    - Leaves slices, scalars, and tuples intact but normalizes their contents.
+    """
+    if isinstance(idx, tuple):
+        # For tuples (e.g., (row_idx, col_idx)), normalize each element
+        normalized = []
+        for i in idx:
+            if isinstance(i, (list, np.ndarray)):
+                normalized.append(np.asarray(i, dtype=int))
+            elif isinstance(i, slice):
+                normalized.append(i)  # Slices are already valid
+            elif np.isscalar(i):
+                normalized.append(int(i))  # Convert scalars to Python int
+            elif isinstance(i, pmat):
+                normalized.append(np.asarray(i.get_full(), dtype=int))
+
+            else:
+                raise TypeError(f"Unsupported index element type: {type(i)}")
+        return tuple(normalized)
+    elif isinstance(idx, (list, np.ndarray)):
+        # For 1D arrays/lists, convert to NumPy int array
+        return np.asarray(idx, dtype=int)
+    elif isinstance(idx, slice):
+        # Slices are already valid
+        return idx
+    elif np.isscalar(idx):
+        # Convert scalars to Python int
+        return int(idx)
+    elif isinstance(idx, pmat):
+        return idx.get_full()
+    else:
+        raise TypeError(f"Unsupported index type: {type(idx)}")
 
 ################################################################################
 # Class pmat (will probably be called p_matrix later)
@@ -133,6 +173,126 @@ class pmat:
         file_size = fh.Get_size()
         fh.Close()
         return file_size
+
+    @staticmethod
+    def from_shared_buffer(win: MPI.Win, shared_array: np.ndarray, dtype=np.float64) -> 'pmat':
+        ########################################################################
+        # Create a new pmat and its extent and position before reading 
+        # numpy array from shared memory
+        ########################################################################
+        coords = pmat.grid_comm.coords
+        n, m = shared_array.shape        
+        
+        # Set up the extented matrix
+        newmat = pmat(n, m, dtype=dtype)
+        newmat_extent = newmat.extents[coords[0]][coords[1]]
+        newmat_position = newmat.offsets[coords[0]][coords[1]]
+
+        newmat_row_start, newmat_row_end = newmat_position[0], newmat_position[0] + newmat_extent[0]
+        newmat_col_start, newmat_col_end = newmat_position[1], newmat_position[1] + newmat_extent[1]
+
+        newmat_local = newmat.local
+        
+        ############################################################################
+        # Synchronize processes before reading
+        ############################################################################
+        win.Fence()
+        
+        # Each rank reads its submatrix block from the shared array
+        newmat_local[:newmat_extent[0], :newmat_extent[1]] = shared_array[newmat_row_start:newmat_row_end, newmat_col_start:newmat_col_end]
+        newmat.local = newmat_local
+        
+        ############################################################################
+        # End the epoch and synchronize processes again
+        ############################################################################
+        win.Fence()
+
+        return newmat
+
+    @staticmethod
+    def fancy_indexing_rows(A: 'pmat', idx):
+        # idx can be a scalar, a slice, a list, or an array of integers
+        # idx can have duplicates and be out of order
+        
+        if np.isscalar(idx):
+            idx = np.array([idx])
+        elif isinstance(idx, list):
+            idx = np.array(idx)
+        elif isinstance(idx, slice):
+            # Convert slice to array of indices    
+            idx = np.arange(idx.start, idx.stop, idx.step or 1)
+            # Alternative: idx = np.r_[idx]
+
+        idx = np.atleast_2d(idx)
+
+        if idx.shape[0] != 1:
+            raise NotImplementedError("Only 1D row vector indexes are supported")
+
+        
+        # idx is a row vector: (1, n_elements)
+        n_elements = idx.shape[1]  # number of rows to select
+
+        ########################################################################
+        # Set up the shared array
+        ########################################################################
+        type = A.dtype
+
+        type_bytes = np.dtype(type).itemsize
+        shape = (n_elements, A.m)
+        size = int(np.prod(shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=shape)
+
+        ############################################################################
+        # 
+        for (B_row, A_row) in enumerate(idx[0]):
+            # if rank == 0: 
+            #     print("A_row:", A_row, "B_row:", B_row)
+
+            # Compute grid row rank in A and local row index
+            A_block, A_block_row  = divmod(A_row, A.n_loc)
+
+            if A_block == A.coords[0]:
+                # Ranks that made it here have a nonempty block if they are in A's row comm
+                row_comm = A.row_comm
+                if row_comm == MPI.COMM_NULL:
+                    continue
+
+                # The row allgather copies into needs to be the full nonempty row size (with padding) because of the way allgather works
+
+                row = np.empty((A.m_loc * row_comm.Get_size()), dtype=A.dtype)
+                A.row_comm.Allgather(A.local[A_block_row], row)
+                row = row[:A.m]  # Trim any padding from the last nonempty block
+                
+                shared_array[B_row] = row
+
+                # if A.coords[1] == 0:
+                    
+                    # print("A_block=",A_block,"A_block_row=",A_block_row )
+                    # print(row[0])
+                    # B_numpy[B_row] = row[0] ### Won't work ... different B_numpy for each rank
+            
+            # if rank == 0:
+            #     print()
+            # grid.Barrier()
+
+        # Synchronize writes across all ranks (this is done in from_shared_buffer as well, but just to be safe)
+        win.Fence()
+
+        # Convert shared array to a pmat 
+        B = pmat.from_shared_buffer(win, shared_array, dtype=A.dtype)
+
+        # Clean up
+        win.Free()
+
+        return B
+
 
 
     @staticmethod
@@ -214,7 +374,7 @@ class pmat:
         ########################################################################
         # Set up the shared array
         ########################################################################
-        type = M_pmat.local.dtype
+        type = M_pmat.dtype
 
         type_bytes = np.dtype(type).itemsize
         size = int(np.prod(M_pmat.shape)) * type_bytes
@@ -498,38 +658,42 @@ class pmat:
         return pmat(self.n, self.m, self.local.astype(dtype))
     
     def __getitem__(self, idx):
-        #### Keep as get_full for now ... optimize later ####
-        numpy_result = self.get_full()[idx]
-        return numpy_result
-        
+
+        idx = normalize_index(idx)
+
+        if isinstance(idx, np.ndarray) and idx.ndim == 1:
+            # 1D array indexing is treated as row indexing
+            idx = np.atleast_2d(idx)
+            return pmat.fancy_indexing_rows(self, idx)
+
         # idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
         # idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
-        # assert(len(idx0) == len(idx1))
+        # # assert(len(idx0) == len(idx1))
 
-        # local_values = []
-        # for (global_i, global_j) in zip(idx0, idx1):
-        #         rank_i, block_i = divmod(global_i, self.n_loc)
-        #         rank_j, block_j = divmod(global_j, self.m_loc)
+        local_values = []
+        for (global_i, global_j) in zip(idx[0], idx[1]):
+                rank_i, block_i = divmod(global_i, self.n_loc)
+                rank_j, block_j = divmod(global_j, self.m_loc)
                 
-        #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
-        #             local_values.append(self.local[block_i, block_j])
+                if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+                    local_values.append(self.local[block_i, block_j])
 
-        # local_values = np.array(local_values, dtype=self.local.dtype)
+        local_values = np.array(local_values, dtype=self.local.dtype)
 
-        # padded = np.full(len(idx0), np.nan, dtype=self.local.dtype)
-        # padded[:len(local_values)] = local_values
+        
+        global_values = self.grid_comm.allgather(local_values)
+        # Filter out empty blocks
+        non_empty_lists = [lst for lst in global_values if len(lst)!= 0] 
+        # if self.rank==0:
+        #     print("local_values:", local_values)
+        #     print("local_values shapes:", [np.array(lv).shape for lv in global_values])
+        # exit()
 
-        # global_values = np.array((1, len(idx0)), dtype=self.local.dtype)
-        # self.grid_comm.Allgather(padded, global_values)
-
-        # if not np.allclose(np.array(local_values), numpy_result):
-        #     raise ValueError(f"pmat __getitem__ mismatch with numpy result\n")
-
-        return local_values
+        global_values = np.concatenate([np.array(lst, dtype=self.dtype) for lst in non_empty_lists])
+        return global_values
 
     def __setitem__(self, idx, value):
-        before_loop = self.get_full()
-        before_loop[idx] = value
+        idx = normalize_index(idx)
 
         idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
         idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
@@ -542,41 +706,58 @@ class pmat:
             if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
                 self.local[block_i, block_j] = value
 
-        if not np.allclose(self.get_full(), before_loop):
-            raise ValueError(f"pmat __setitem__ failed to set value correctly:\n")
-        
-    ############################################################################
+        return
 
-        
-        
+
     # def __getitem__(self, idx):
-    #     # val = self.data[idx]
-    #     # return MyArray(val) if isinstance(val, np.ndarray) else val
-    #     # if pmat.grid_comm.rank == 0:
-    #     #     print(f"index0 ({len(idx[0])})=\n{idx[0]}\n{"*"*50}\nindex1 ({len(idx[0])})=\n{idx[1]}")
-    #     # exit()
-    #     full = self.get_full()
-    #     val = np.atleast_2d(full[idx])
-    #     # if pmat.grid_comm.rank == 0:
-    #     #     print(f"val.shape={val.shape}")
-    #     # exit()
-
-    #     #####
-    #     # Todo: Index -> pmat without going through full numpy array (shared memory?)
-    #     ####
-    #     return pmat.from_numpy(val) if isinstance(val, np.ndarray) else val
-    
-    # def __setitem__(self, idx, value):
-    #     # i, i_rem = divmod(self.n, idx[0]) 
-    #     # j, j_rem = divmod(self.m, idx[1]) 
+    #     #### Keep as get_full for now ... optimize later ####
+    #     numpy_result = self.get_full()[idx]
+    #     return numpy_result
         
-    #     # if self.coords[0] == i and self.coords[1] == j:
-    #     #     pass
-    #     #     # print(f"Setting item on rank {self.rank} at coords {self.coords} for index {idx} with value {value}")
+    #     # idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+    #     # idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+    #     # assert(len(idx0) == len(idx1))
 
-    #     full = self.get_full()
-    #     full[idx] = value
-    #     self.set_full(full)
+    #     # local_values = []
+    #     # for (global_i, global_j) in zip(idx0, idx1):
+    #     #         rank_i, block_i = divmod(global_i, self.n_loc)
+    #     #         rank_j, block_j = divmod(global_j, self.m_loc)
+                
+    #     #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+    #     #             local_values.append(self.local[block_i, block_j])
+
+    #     # local_values = np.array(local_values, dtype=self.local.dtype)
+
+    #     # padded = np.full(len(idx0), np.nan, dtype=self.local.dtype)
+    #     # padded[:len(local_values)] = local_values
+
+    #     # global_values = np.array((1, len(idx0)), dtype=self.local.dtype)
+    #     # self.grid_comm.Allgather(padded, global_values)
+
+    #     # if not np.allclose(np.array(local_values), numpy_result):
+    #     #     raise ValueError(f"pmat __getitem__ mismatch with numpy result\n")
+
+    #     return local_values
+
+    # def __setitem__(self, idx, value):
+    #     before_loop = self.get_full()
+    #     before_loop[idx] = value
+
+    #     idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+    #     idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+
+    #     for (global_i, global_j) in zip(idx0, idx1):
+
+    #         rank_i, block_i = divmod(global_i, self.n_loc)
+    #         rank_j, block_j = divmod(global_j, self.m_loc)
+                
+    #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+    #             self.local[block_i, block_j] = value
+
+    #     if not np.allclose(self.get_full(), before_loop):
+    #         raise ValueError(f"pmat __setitem__ failed to set value correctly:\n")
+        
+    # ############################################################################
 
     def remove_first_column(self):
     
@@ -596,7 +777,7 @@ class pmat:
         local = self.local[:extent[0], :extent[1]]
 
         # Set up the submatrix
-        submat = pmat(n, m - 1)
+        submat = pmat(n, m - 1, dtype=self.dtype)
         submat_extent = submat.extents[coords[0]][coords[1]]
         submat_position = submat.offsets[coords[0]][coords[1]]
 
@@ -1288,7 +1469,7 @@ class pmat:
         n, m = self.shape        
         
         # Set up the extented matrix
-        newmat = pmat(n + 1, m )
+        newmat = pmat(n + 1, m, dtype=self.dtype)
         newmat_extent = newmat.extents[coords[0]][coords[1]]
         newmat_position = newmat.offsets[coords[0]][coords[1]]
 

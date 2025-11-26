@@ -44,6 +44,55 @@ def load_labels(filename):
         labels = np.frombuffer(f.read(), dtype=np.uint8)
         return labels
 
+
+
+# # (60000, 28, 28)
+# X_train = load_images(os.path.join(os.path.dirname(__file__), "train-images.idx3-ubyte"))
+# # (60000,)
+# y_train = load_labels(os.path.join(os.path.dirname(__file__), "train-labels.idx1-ubyte"))
+# # (10000, 28, 28)
+# X_test  = load_images(os.path.join(os.path.dirname(__file__), "t10k-images.idx3-ubyte"))
+# # (10000,)
+# y_test  = load_labels(os.path.join(os.path.dirname(__file__), "t10k-labels.idx1-ubyte"))
+
+# """ Preprocessing """
+# # Flatten to 2D: (60000, 28, 28) → (60000, 784)
+# X_train = X_train.reshape(X_train.shape[0], -1)
+
+# # Flatten to 2D: (10000, 28, 28) → (10000, 784)
+# X_test = X_test.reshape(X_test.shape[0], -1)  
+
+# # Normalize pixel by grayscale max value
+# # X_train = (X_train.astype(np.float32) / 255.0)  
+# # X_test = (X_test.astype(np.float32) / 255.0)
+
+# # Convert test labels to int64 for compatibility
+# y_train = y_train.astype(np.int64) 
+# y_test = y_test.astype(np.int64)    
+
+
+
+
+# """
+# ##### Do this once: Write data as files #####
+# # p_X_train = pmat.from_numpy(X_train)
+# # p_y_train = pmat.from_numpy(y_train.reshape(-1,1))  # make 2d
+# # p_X_test = pmat.from_numpy(X_test)
+# # p_y_test = pmat.from_numpy(y_test.reshape(-1,1))    # make
+
+
+# # p_X_train.to_file("X_train.dat")
+# # p_y_train.to_file("y_train.dat")
+# # p_X_test.to_file("X_test.dat")
+# # p_y_test.to_file("y_test.dat")
+
+# #### Load from files #####
+# p_X_train = pmat.from_file("X_train.dat")
+# p_y_train = pmat.from_file("y_train.dat")
+# p_X_test = pmat.from_file("X_test.dat")
+# p_y_test = pmat.from_file("y_test.dat")
+# """
+
 def read_mnist_data():
     """ Load MNIST data from original ubyte files """
     # (60000, 28, 28)
@@ -54,13 +103,17 @@ def read_mnist_data():
     X_test  = load_images(os.path.join(os.path.dirname(__file__), "t10k-images.idx3-ubyte"))
     # (10000,)
     y_test  = load_labels(os.path.join(os.path.dirname(__file__), "t10k-labels.idx1-ubyte"))
+    
+    
+    ### Preprocessing ###
+    
+    ### Flattening not needed anymore: flattening now done in load_images ###
 
-    """ Preprocessing """
-    # Flatten to 2D: (60000, 28, 28) → (60000, 784)
-    X_train = X_train.reshape(X_train.shape[0], -1)
+    # # Flatten to 2D: (60000, 28, 28) → (60000, 784)
+    # X_train = X_train.reshape(X_train.shape[0], -1)
 
-    # Flatten to 2D: (10000, 28, 28) → (10000, 784)
-    X_test = X_test.reshape(X_test.shape[0], -1)  
+    # # Flatten to 2D: (10000, 28, 28) → (10000, 784)
+    # X_test = X_test.reshape(X_test.shape[0], -1)  
 
     # Normalize pixel by grayscale max value
     # X_train = (X_train.astype(np.float32) / 255.0)  
@@ -87,31 +140,42 @@ def write_data_files():
 
 def load_data_files():
 #### Load from files #####
-    p_X_train = pmat.from_file("X_train.dat")
-    p_y_train = pmat.from_file("y_train.dat")
-    p_X_test = pmat.from_file("X_test.dat")
-    p_y_test = pmat.from_file("y_test.dat")
+    p_X_train, nbytes = pmat.from_file("X_train.dat")
+    p_y_train, nbytes = pmat.from_file("y_train.dat")
+    p_X_test, nbytes = pmat.from_file("X_test.dat")
+    p_y_test, nbytes = pmat.from_file("y_test.dat")
 
     return p_X_train, p_y_train, p_X_test, p_y_test
 
 
-X_train, y_train, X_test, y_test = read_mnist_data()
+# X_train, y_train, X_test, y_test = read_mnist_data()
 
 # Uncomment to write data files once
 # write_data_files()
 # if MPI.COMM_WORLD.Get_rank() == 0:
 #     print("Wrote data files."); 
 
-# p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
-# exit()
+################################################################################
+
+p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
 
 
-if MPI.COMM_WORLD.Get_rank() == 0:
-    print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
-    print(f"Test data: {X_test.shape}, Labels: {y_test.shape}")
-    print(f"Pixel value range: [{X_train.min():.3f}, {X_train.max():.3f}]")
-    print(f"Training labels: {np.unique(y_train)}")
-    print(f"Test labels: {np.unique(y_test)}")
+
+### Original version ###
+# if MPI.COMM_WORLD.Get_rank() == 0:
+#     print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
+#     print(f"Test data: {X_test.shape}, Labels: {y_test.shape}")
+#     print(f"Pixel value range: [{X_train.min():.3f}, {X_train.max():.3f}]")
+#     print(f"Training labels: {np.unique(y_train)}")
+#     print(f"Test labels: {np.unique(y_test)}")
+
+### Pmat version ###
+# if MPI.COMM_WORLD.Get_rank() == 0:
+print(f"Training data: {p_X_train.shape}, Labels: {p_y_train.shape}")
+print(f"Test data: {p_X_test.shape}, Labels: {p_y_test.shape}")
+print(f"Pixel value range: {p_X_train.pmin():.3f}, {p_X_train.pmax():.3f}]")
+print(f"Training labels: np.unique(y_train)")
+print(f"Test labels: np.unique(y_test)")
 
 """ Hyperparameters """
 alpha = 1e-3
@@ -179,9 +243,15 @@ def main():
     ####### Original version ##########    
     # print(f"### Initial test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
 
-    """ Training """
-    n_batches = X_train.shape[0] // batch_size
+    ############################################################################
+    # Training 
+    ############################################################################
 
+    ### Original version ###
+    # n_batches = X_train.shape[0] // batch_size
+
+    ### Pmat version ###
+    n_batches = p_X_train.shape[0] // batch_size
     losses, accuracies = [], []
 
     if MPI.COMM_WORLD.Get_rank() == 0:
@@ -230,25 +300,50 @@ def main():
             print(f"Stopping early at batch {len(losses)} due to reaching batch threshold: {len(losses)} >= {stop_at_batch}")
             break
 
-        # Shuffle data
-        indicies = np.random.permutation(np.arange(X_train.shape[0]))  
+        #### Shuffle data into batches ####
+
+        ### Original version ###
+        # indicies = np.random.permutation(np.arange(X_train.shape[0]))
+
+        # # Make sure indicies is the same on all ranks (in case their random seed is different)
+        # if MPI.COMM_WORLD.rank == 0:
+        #     indicies = np.random.permutation(np.arange(X_train.shape[0]))
+        # else:
+        #     indicies = np.empty(X_train.shape[0], dtype=int)
+        # MPI.COMM_WORLD.Bcast(indicies, root=0)  # Broadcast to all ranks
+
+
+        ### Pmat version ###
+        indicies = np.random.permutation(np.arange(p_X_train.shape[0]))  
+
+        # Make sure indicies is the same on all ranks (in case their random seed is different)
+        if MPI.COMM_WORLD.rank == 0:
+            indicies = np.random.permutation(np.arange(p_X_train.shape[0]))
+        else:
+            indicies = np.empty(p_X_train.shape[0], dtype=int)
+        MPI.COMM_WORLD.Bcast(indicies, root=0)  # Broadcast to all ranks
 
         # Split into batches
         batches_idx = np.array_split(indicies, n_batches)  
 
+        ############ Training loop over batches ############
         for (batch_num, batch_idx) in enumerate(batches_idx):
             # Get batch data
-            X = X_train[batch_idx]  # (batch_size, 784)
-            
-            
+
             ###### Original version ##########
-            Y = y_train[batch_idx]  # (batch_size,)
-            
+            # X = X_train[batch_idx]  # (batch_size, 784)
+            # Y = y_train[batch_idx]  # (batch_size,)
+
             ###### pmat verson ####
-            # Y = Y.reshape(1, -1) # make 2d
+            p_X = p_X_train[batch_idx]  # (batch_size, 784)
+            p_Y = p_y_train[batch_idx]  # (batch_size,)
+
 
             # Forward pass
-            h1 = fc1.forward(X)   # (64, batch)
+            ### Original version ###
+            # h1 = fc1.forward(X)   # (64, batch)
+
+            h1 = fc1.forward(p_X)   # (64, batch)
             h2 = fc2.forward(h1)  # (10, 100)
             h3 = fc3.forward(h2)  # (10, 100)
             # h4 = fc4.forward(h3)  # (10, 100)
@@ -262,7 +357,7 @@ def main():
 
             ######### patmat version ##########
             p_log_probs = nn.log_softmax(p_logits.T)  # Shape: (batch_size, 10)
-            loss = nn.nll_loss(p_log_probs, Y)
+            loss = nn.nll_loss(p_log_probs, p_Y)
             
 
 
@@ -272,7 +367,7 @@ def main():
             # numpy_acc = numpy_sum / Y.shape[0]
 
             pmat_argmax = np.argmax(p_log_probs, axis=1)
-            p_Y = pmat.from_numpy(Y.reshape(-1,1))
+            # p_Y = pmat.from_numpy(Y.reshape(-1,1))
             pmat_cmp = (pmat_argmax == p_Y)
             pmat_sum = np.sum(pmat_cmp)
             pmat_acc = pmat_sum / p_Y.shape[0]
@@ -297,7 +392,7 @@ def main():
             # Backward pass - start with combined log_softmax + NLL derivative
             ####################################################################
             ######### patmat version ##########
-            p_dL_dlogits = nn.nll_loss_derivative(p_log_probs, Y)  # (batch_size, 10)
+            p_dL_dlogits = nn.nll_loss_derivative(p_log_probs, p_Y)  # (batch_size, 10)
             
             ####### Original version ##########
             # dL_dlogits = nn.nll_loss_derivative(log_probs, Y)  # (batch_size, 10)
@@ -336,10 +431,10 @@ def main():
             total_batches += n_batches
             elapsed_time = MPI.Wtime() - start_time
 
-            if MPI.COMM_WORLD.Get_rank() == 0:
-                #  RSS = Resident Set Size, a measure of the physical memory (RAM) currently used by a process. It includes the code, data, and stack segments that are resident in memory, excluding swapped-out pages.
+            # if MPI.COMM_WORLD.Get_rank() == 0:
+            #  RSS = Resident Set Size, a measure of the physical memory (RAM) currently used by a process. It includes the code, data, and stack segments that are resident in memory, excluding swapped-out pages.
 
-                print(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()} of {MPI.COMM_WORLD.Get_size()}, Per Process Memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB, Total Time: {elapsed_time:.5f} sec")
+            print_ordered_by_rank(f"Epoch {epoch+1}, Batch {n_batches*epoch+batch_num+1}, Loss: {loss:.4f}, Training Accuracy: {acc:.4f}, Process: {MPI.COMM_WORLD.Get_rank()} of {MPI.COMM_WORLD.Get_size()}, Per Process Memory (RSS): {proc.memory_info().rss / 1024**2:.2f} MB, Total Time: {elapsed_time:.2f} sec")
 
         ### Original version ##########
         # print(f"#### Epoch {epoch+1} test accuracy: {evaluate():.4f}, Process: {MPI.COMM_WORLD.Get_rank()+1} of {MPI.COMM_WORLD.Get_size()} ####")
