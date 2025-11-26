@@ -161,21 +161,10 @@ p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
 
 
 
-### Original version ###
-# if MPI.COMM_WORLD.Get_rank() == 0:
-#     print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
-#     print(f"Test data: {X_test.shape}, Labels: {y_test.shape}")
-#     print(f"Pixel value range: [{X_train.min():.3f}, {X_train.max():.3f}]")
-#     print(f"Training labels: {np.unique(y_train)}")
-#     print(f"Test labels: {np.unique(y_test)}")
+### Hyperparameters and Network ###
+################################################################################
 
-### Pmat version ###
-# if MPI.COMM_WORLD.Get_rank() == 0:
-print(f"Training data: {p_X_train.shape}, Labels: {p_y_train.shape}")
-print(f"Test data: {p_X_test.shape}, Labels: {p_y_test.shape}")
-print(f"Pixel value range: {p_X_train.pmin():.3f}, {p_X_train.pmax():.3f}]")
-print(f"Training labels: np.unique(y_train)")
-print(f"Test labels: np.unique(y_test)")
+import sys
 
 """ Hyperparameters """
 alpha = 1e-3
@@ -190,13 +179,16 @@ stop_at_epoch = None        # 5
 stop_at_batch = None        # 272
 
 """ Network"""
-scale = 1 # scale factor for hidden layer size (64 shows good results while comparing serial to parallel)
+scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0 # scale factor for hidden layer size (64 shows good results while comparing serial to parallel)
+
+hidden_size = int(64*scale)
 
 # 28*28 = 784 input features
-fc1 = nn.Parallel_Layer(input_size=28*28,  output_size=int(64*scale)); fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc2 = nn.Parallel_Layer(input_size=int(64*scale), output_size=int(64*scale)); fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc3 = nn.Parallel_Layer(input_size=int(64*scale), output_size=int(64*scale)); fc3.phi, fc3.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc4 = nn.Parallel_Layer(input_size=int(64*scale), output_size=10); fc4.phi= nn.log_softmax 
+fc1 = nn.Parallel_Layer(input_size=28*28,  output_size=hidden_size); fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
+fc2 = nn.Parallel_Layer(input_size=hidden_size, output_size=hidden_size); fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
+fc3 = nn.Parallel_Layer(input_size=hidden_size, output_size=hidden_size); fc3.phi, fc3.phi_prime = nn.ReLU, nn.ReLU_derivative
+fc4 = nn.Parallel_Layer(input_size=hidden_size, output_size=10); fc4.phi= nn.log_softmax 
+
 
 """ Testing """
 
@@ -220,6 +212,25 @@ def evaluate():
     return np.sum(y_hat == y_test) / y_test.shape[0]
 
 def main():
+    ### Original version ###
+    # if MPI.COMM_WORLD.Get_rank() == 0:
+    #     print(f"Training data: {X_train.shape}, Labels: {y_train.shape}")
+    #     print(f"Test data: {X_test.shape}, Labels: {y_test.shape}")
+    #     print(f"Pixel value range: [{X_train.min():.3f}, {X_train.max():.3f}]")
+    #     print(f"Training labels: {np.unique(y_train)}")
+    #     print(f"Test labels: {np.unique(y_test)}")
+
+    ### Pmat version ###
+    pixel_value_min, pixel_value_max = p_X_train.pmin(), p_X_train.pmax()
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        print(f"Training data: {p_X_train.shape}, Labels: {p_y_train.shape}")
+        print(f"Test data: {p_X_test.shape}, Labels: {p_y_test.shape}")
+        print(f"Pixel value range: {pixel_value_min:.3f}, {pixel_value_max:.3f}]")
+        print(f"Training labels: np.unique(y_train)")
+        print(f"Test labels: np.unique(y_test)")
+        print(f"Hidden layer size: {hidden_size}")
+
+
 
     # logits_numpy = np.random.uniform(-1.0, 1.0, (5, 5))
     # logits_pmat = pmat.from_numpy(logits_numpy)
