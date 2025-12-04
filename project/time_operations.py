@@ -19,8 +19,8 @@ coords = grid.coords
 
 sizes = [
     (64, 64, 64),
-    (2048, 2048, 2048),
-    (4096, 4096, 4096),
+    # (2048, 2048, 2048),
+    # (4096, 4096, 4096),
     # (8192, 8192, 8192),
 ]
 
@@ -29,6 +29,10 @@ repeat = 5
 warmups = 2
 use_min_time = False
 
+# For layer timing
+hidden_size = 64
+batch_size = 1000
+alpha = 1e-3
 
 
 
@@ -37,6 +41,7 @@ use_min_time = False
 if __name__ == "__main__":
     if grid.rank == 0:
         print("=" * 40)
+        print(f"Number of processes: {size} in a {grid.dims} grid")
         print(f"warmups={warmups}, repeat={repeat}, use_min_time={use_min_time}")
         print("=" * 40)
 
@@ -60,10 +65,13 @@ if __name__ == "__main__":
 
             items = [np.arange(0, n).astype(int), np.random.randint(0, m, size=n).astype(int)]
 
-            hidden_size = 64
-            # fc1 = nn.Parallel_Layer(input_size=784,  output_size=hidden_size); fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
-            fc2 = nn.Parallel_Layer(input_size=hidden_size, output_size=hidden_size); fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
-            X_pmat = pmat.from_numpy(np.random.rand(hidden_size, 1000).astype(dtype))
+
+            X_pmat = pmat.from_numpy(np.random.rand(hidden_size, batch_size).astype(dtype))
+
+            fc2 = nn.Parallel_Layer(input_size=hidden_size, output_size=hidden_size); 
+            fc2.phi = nn.ReLU
+            fc2.phi_prime = nn.ReLU_derivative
+
 
             operations = {
                 "from_numpy":           lambda: pmat.from_numpy(A_np),
@@ -90,13 +98,15 @@ if __name__ == "__main__":
 
                 "stack_ones_on_top":    lambda: A_pmat.stack_ones_on_top(),
 
-                "ReLU":                    lambda: nn.ReLU(A_pmat),
-                "ReLU_derivative":         lambda: nn.ReLU_derivative(A_pmat),
+                "ReLU":                     lambda: nn.ReLU(A_pmat),
+                "ReLU_derivative":          lambda: nn.ReLU_derivative(A_pmat),
                 "log_softmax":              lambda: nn.log_softmax(A_pmat.T),
                 "nll_loss":                 lambda: nn.nll_loss(A_pmat, items[1]),  
                 "nll_loss_derivative":      lambda: nn.nll_loss_derivative(A_pmat, items[1]),
 
-                f"forward prop({hidden_size,1000})":            lambda: fc2.forward(X_pmat),
+                f"layer forward(ReLU, {hidden_size,batch_size})":           lambda: fc2.forward(X_pmat),
+                f"layer backward(ReLU-deriv, {hidden_size,batch_size})":    lambda: fc2.backward(X_pmat),
+                f"layer update(Adam optimization)":                         lambda: fc2.update_weights(alpha=0.001),
             
             }
 
@@ -104,7 +114,7 @@ if __name__ == "__main__":
             for op_name, op_func in operations.items():
                 grid.Barrier()
                 min_t, mean_t = time_it(op_func, repeat=repeat, warmups=warmups, timer_fn=MPI.Wtime)
-                
+
                 if use_min_time:
                     time = grid.reduce(min_t, op=MPI.MIN, root=0)
                 else:
@@ -116,7 +126,9 @@ if __name__ == "__main__":
                     results.append((op_name, time))
 
             if grid.rank == 0:
+
                 results.sort(key=lambda x: x[1], reverse=True)  # sort by time (descending)
+                max_chars = max(len(op_name) for op_name, _ in results) 
                 for op_name, time in results:
-                    print(f"{op_name + " =>":>25} {time:.5f} seconds")
+                    print(f"{(op_name + ' =>'):>{max_chars + 5}} {time:.5f} seconds")
                 

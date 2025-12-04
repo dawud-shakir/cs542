@@ -4,7 +4,7 @@ import numpy as np
 import struct           # for unpacking binary files
 
 from pathlib import Path
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parents[1]   # utilities is in project/package/ so go up two levels to project/
 DATA_DIR = ROOT_DIR / "data"
 
 """ Data """

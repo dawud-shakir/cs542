@@ -46,9 +46,27 @@ def write_data_files():
     p_X_test.to_file(DATA_DIR / "X_test.dat")
     p_y_test.to_file(DATA_DIR / "y_test.dat")
 
+    return p_X_train, p_y_train, p_X_test, p_y_test
+
 def load_data_files():
-#### Load from files #####
     rank = MPI.COMM_WORLD.Get_rank()
+    
+    if not (DATA_DIR / "X_train.dat").is_file() or not (DATA_DIR / "y_train.dat").is_file():
+        if rank == 0: print("Data files not found. Writing data files...")
+        t0 = MPI.Wtime()
+
+        p_X_train, p_y_train, p_X_test, p_y_test = write_data_files()
+
+        t1 = MPI.Wtime()
+        ttot = t1 - t0
+        time = MPI.COMM_WORLD.reduce(ttot, op=MPI.MAX, root=0)
+        if rank == 0: print(f"Loaded and wrote data in {time:.2f} sec")
+
+        return p_X_train, p_y_train, p_X_test, p_y_test
+        
+
+#### Load from files #####
+
     if rank == 0: print("Loading data files...")
     
     t0 = MPI.Wtime()
