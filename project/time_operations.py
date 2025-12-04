@@ -19,8 +19,8 @@ coords = grid.coords
 
 sizes = [
     (64, 64, 64),
-    # (2048, 2048, 2048),
-    # (4096, 4096, 4096),
+    (2048, 2048, 2048),
+    (4096, 4096, 4096),
     # (8192, 8192, 8192),
 ]
 
@@ -106,7 +106,7 @@ if __name__ == "__main__":
 
                 f"layer forward(ReLU, {hidden_size,batch_size})":           lambda: fc2.forward(X_pmat),
                 f"layer backward(ReLU-deriv, {hidden_size,batch_size})":    lambda: fc2.backward(X_pmat),
-                f"layer update(Adam optimization)":                         lambda: fc2.update_weights(alpha=0.001),
+                f"layer update(Adam optimization)":                         lambda: (fc2.backward(X_pmat), fc2.update_weights(alpha=0.001)),
             
             }
 
@@ -125,10 +125,20 @@ if __name__ == "__main__":
                 if grid.rank == 0:
                     results.append((op_name, time))
 
+            # For update_weights, subtract the time taken by backward pass
+            for i, (op_name, _) in enumerate(results):
+                if op_name == "layer update(Adam optimization)":
+                    backward_time = next(t for name, t in results if name == f"layer backward(ReLU-deriv, {hidden_size,batch_size})")
+                    adjusted_time = results[i][1] - backward_time
+                    results[i] = (op_name, adjusted_time)
+                    break
+
             if grid.rank == 0:
 
                 results.sort(key=lambda x: x[1], reverse=True)  # sort by time (descending)
                 max_chars = max(len(op_name) for op_name, _ in results) 
                 for op_name, time in results:
+
+
                     print(f"{(op_name + ' =>'):>{max_chars + 5}} {time:.5f} seconds")
                 
