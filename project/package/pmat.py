@@ -1,0 +1,1565 @@
+from math import ceil
+import warnings
+import os # for file paths
+import numpy as np
+np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
+
+from mpi4py import MPI
+from package.utilities import create_grid_comm
+import package.utilities as utils
+
+################################################################################
+# Normalize an index to a form NumPy can handle for advanced indexing.
+#   - Converts arrays/lists to NumPy int arrays.
+#   - Leave slices, scalars, and tuples intact but normalize their content.
+################################################################################
+def normalize_index(idx):
+
+    if isinstance(idx, tuple):
+        # For tuples (e.g., (row_idx, col_idx)), normalize each element
+        normalized = []
+        for i in idx:
+            if isinstance(i, (list, np.ndarray)):
+                normalized.append(np.asarray(i, dtype=int))
+            elif isinstance(i, slice):
+                normalized.append(i)  # Slices are already valid
+            elif np.isscalar(i):
+                normalized.append(int(i))  # Convert scalars to Python int
+            # elif isinstance(i, pmat):
+            ### Use "duck-typing" to avoid refering to pmat here
+            elif hasattr(i, "get_full") and callable(i.get_full):            
+                normalized.append(np.asarray(i.get_full(), dtype=int))
+
+            else:
+                raise TypeError(f"Unsupported index element type: {type(i)}")
+        return tuple(normalized)
+    elif isinstance(idx, (list, np.ndarray)):
+        # For 1D arrays/lists, convert to NumPy int array
+        return np.asarray(idx, dtype=int)
+    elif isinstance(idx, slice):
+        # Slices are already valid
+        return idx
+    elif np.isscalar(idx):
+        # Convert scalars to Python int
+        return int(idx)
+    # elif isinstance(idx, pmat):
+    ### Use "duck-typing" to avoid refering to pmat here
+    elif hasattr(idx, "get_full") and callable(idx.get_full):
+        return idx.get_full()
+    else:
+        raise TypeError(f"Unsupported index type: {type(idx)}")
+
+
+################################################################################
+# Class pmat (will probably be called p_matrix later)
+################################################################################
+
+class pmat:
+    ############################################################################
+    # File I/O
+    ############################################################################
+    def to_file(self, filename: str, prefix_current_directory=True) -> int:
+        comm = MPI.COMM_WORLD
+    
+        filepath = os.path.join(os.path.dirname(__file__), filename) if prefix_current_directory else filename
+
+        # Open the file
+        amode = MPI.MODE_CREATE | MPI.MODE_WRONLY
+        fh = MPI.File.Open(comm, filepath, amode)
+
+        data_offset = 0
+
+        # Write header
+        if self.rank == 0:
+            dtype_str = np.dtype(self.dtype).name  # e.g., 'float64'
+            dtype_bytes = dtype_str.encode('utf-8')
+            dtype_len = np.int32(len(dtype_bytes))  # store length as 4 bytes
+
+            header = np.array([self.n, self.m], dtype=np.int64).tobytes()
+            fh.Write_at(0, header)
+            fh.Write_at(16, dtype_len.tobytes())
+            fh.Write_at(20, dtype_bytes)
+            
+            # n (8 bytes), m (8 bytes), dtype_len (4 bytes), dtype_str (dtype_len)
+            
+            data_offset += 20 + dtype_len
+
+        data_offset = np.array(data_offset, dtype=np.int64)
+        MPI.COMM_WORLD.Bcast(data_offset, root=0)
+        data_offset = int(data_offset)  # Convert back to int
+        
+        # Wait for header to be written before writing any data
+        comm.Barrier()  
+        
+        coords = self.coords
+        extent = self.extents[coords[0]][coords[1]]
+        offset = self.offsets[coords[0]][coords[1]]
+
+        local_rows, local_cols = extent[0], extent[1]
+        row_offset, col_offset = offset[0], offset[1]
+
+        for i in range(local_rows):
+            global_row = row_offset + i
+            file_offset = data_offset + (global_row * self.m + col_offset) * np.dtype(self.dtype).itemsize
+            fh.Write_at(file_offset, self.local[i, :local_cols].tobytes())
+
+       
+
+        file_size = fh.Get_size()
+        fh.Close()
+        return file_size
+
+    @staticmethod
+    def from_shared_buffer(win: MPI.Win, shared_array: np.ndarray, dtype=np.float64) -> 'pmat':
+        ########################################################################
+        # Create a new pmat and its extent and position before reading 
+        # numpy array from shared memory
+        ########################################################################
+        coords = pmat.grid_comm.coords
+        n, m = shared_array.shape        
+        
+        # Set up the extented matrix
+        newmat = pmat(n, m, dtype=dtype)
+        newmat_extent = newmat.extents[coords[0]][coords[1]]
+        newmat_position = newmat.offsets[coords[0]][coords[1]]
+
+        newmat_row_start, newmat_row_end = newmat_position[0], newmat_position[0] + newmat_extent[0]
+        newmat_col_start, newmat_col_end = newmat_position[1], newmat_position[1] + newmat_extent[1]
+
+        newmat_local = newmat.local
+        
+        ############################################################################
+        # Synchronize processes before reading
+        ############################################################################
+        win.Fence()
+        
+        # Each rank reads its submatrix block from the shared array
+        newmat_local[:newmat_extent[0], :newmat_extent[1]] = shared_array[newmat_row_start:newmat_row_end, newmat_col_start:newmat_col_end]
+        newmat.local = newmat_local
+        
+        ############################################################################
+        # End the epoch and synchronize processes again
+        ############################################################################
+        win.Fence()
+
+        return newmat
+
+    @staticmethod
+    def fancy_indexing_rows(A: 'pmat', idx):
+        # idx can be a scalar, a slice, a list, or an array of integers
+        # idx can have duplicates and be out of order
+        
+        if np.isscalar(idx):
+            idx = np.array([idx])
+        elif isinstance(idx, list):
+            idx = np.array(idx)
+        elif isinstance(idx, slice):
+            # Convert slice to array of indices    
+            idx = np.arange(idx.start, idx.stop, idx.step or 1)
+            # Alternative: idx = np.r_[idx]
+
+        idx = np.atleast_2d(idx)
+
+        if idx.shape[0] != 1:
+            raise NotImplementedError("Only 1D row vector indexes are supported")
+
+        
+        # idx is a row vector: (1, n_elements)
+        n_elements = idx.shape[1]  # number of rows to select
+
+        ########################################################################
+        # Set up the shared array
+        ########################################################################
+        type = A.dtype
+
+        type_bytes = np.dtype(type).itemsize
+        shape = (n_elements, A.m)
+        size = int(np.prod(shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=shape)
+
+        ############################################################################
+        # 
+        for (B_row, A_row) in enumerate(idx[0]):
+            # if rank == 0: 
+            #     print("A_row:", A_row, "B_row:", B_row)
+
+            # Compute grid row rank in A and local row index
+            A_block, A_block_row  = divmod(A_row, A.n_loc)
+
+            if A_block == A.coords[0]:
+                # Ranks that made it here have a nonempty block if they are in A's row comm
+                row_comm = A.row_comm
+                if row_comm == MPI.COMM_NULL:
+                    continue
+
+                # The row allgather copies into needs to be the full nonempty row size (with padding) because of the way allgather works
+
+                row = np.empty((A.m_loc * row_comm.Get_size()), dtype=A.dtype)
+                A.row_comm.Allgather(A.local[A_block_row], row)
+                row = row[:A.m]  # Trim any padding from the last nonempty block
+                
+                shared_array[B_row] = row
+
+                # if A.coords[1] == 0:
+                    
+                    # print("A_block=",A_block,"A_block_row=",A_block_row )
+                    # print(row[0])
+                    # B_numpy[B_row] = row[0] ### Won't work ... different B_numpy for each rank
+            
+            # if rank == 0:
+            #     print()
+            # grid.Barrier()
+
+        # Synchronize writes across all ranks (this is done in from_shared_buffer as well, but just to be safe)
+        win.Fence()
+
+        # Convert shared array to a pmat 
+        B = pmat.from_shared_buffer(win, shared_array, dtype=A.dtype)
+
+        # Clean up
+        win.Free()
+
+        return B
+
+
+
+    @staticmethod
+    def from_file(filename: str, prefix_current_directory=True) -> tuple['pmat', int]:
+        comm = MPI.COMM_WORLD
+
+        filepath = os.path.join(os.path.dirname(__file__), filename) if prefix_current_directory else filename
+
+        # Open the file
+        amode = MPI.MODE_RDONLY
+        fh = MPI.File.Open(comm, filepath, amode)
+
+        file_size = fh.Get_size()
+
+        header = np.empty(2, dtype=np.int64)
+
+        fh.Read_at(0, header)
+        dtype_len = np.empty(1, dtype=np.int32)
+        fh.Read_at(16, dtype_len)
+        dtype_bytes = bytearray(dtype_len[0])
+        fh.Read_at(20, dtype_bytes)
+        dtype_str = dtype_bytes.decode('utf-8')
+        
+        dtype = np.dtype(dtype_str)
+        nrows, ncols = header
+
+        data_offset = 20 + dtype_len[0]
+        
+        # Empty pmat
+        pmat_matrix = pmat(nrows, ncols)
+
+        coords = pmat_matrix.coords
+        extent = pmat_matrix.extents[coords[0]][coords[1]]
+        offset = pmat_matrix.offsets[coords[0]][coords[1]]
+
+        local_rows, local_cols = extent[0], extent[1]
+        row_offset, col_offset = offset[0], offset[1]
+
+        for i in range(local_rows):
+            global_row = row_offset + i
+            file_offset = data_offset + (global_row * ncols + col_offset) * np.dtype(dtype).itemsize
+            buffer = bytearray(local_cols * np.dtype(dtype).itemsize)
+            fh.Read_at(file_offset, buffer)
+            pmat_matrix.local[i, :local_cols] = np.frombuffer(buffer, dtype=dtype)
+
+        fh.Close()
+        return (pmat_matrix, file_size)
+
+
+    ############################################################################
+    # Static members and methods
+    ############################################################################
+
+    # Static grid communicator shared by all pmats
+    grid_comm = create_grid_comm()
+
+    def get_local(self):
+        n_loc, m_loc = self.extents[self.coords[0]][self.coords[1]]
+        return self.local[:n_loc, :m_loc]
+
+    def _set_local(self, local):
+        # Local block will be (n_pad, m_pad) larger than local if there is zero padding.
+        self.local = np.zeros((self.n_loc, self.m_loc), dtype=np.double)
+        self.local = np.ascontiguousarray(self.local)
+        
+        if local is not None:
+            self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
+
+    def set_full(self, M):
+        blocks = []
+        for i in range(pmat.grid_comm.dims[0]):
+            for j in range(pmat.grid_comm.dims[1]):
+                row_start = i * self.n_loc
+                row_end = min((i + 1) * self.n_loc, self.n)
+                col_start = j * self.m_loc
+                col_end = min((j + 1) * self.m_loc, self.m)
+                
+                block = M[row_start:row_end, col_start:col_end]
+                blocks.append(block)
+
+        # Scatter blocks to all processes
+        local_block = pmat.grid_comm.scatter(blocks, root=0)
+        
+        # Set local block
+        self.local[:local_block.shape[0], :local_block.shape[1]] = local_block
+
+    def get_full(self, remove_padding=True):
+        # Gather all blocks at root
+        Pr = pmat.grid_comm.dims[0]
+        Pc = pmat.grid_comm.dims[1]
+
+        M = np.zeros((self.n_loc * Pr, self.m_loc * Pc), dtype=self.dtype)
+
+        # All processes gather a copy of all blocks
+        all_blocks = pmat.grid_comm.allgather(self.local)
+
+        if all_blocks is not None:
+      
+            for i, block in enumerate(all_blocks):
+                row, col = divmod(i, pmat.grid_comm.dims[1]) 
+
+                # Add padding if needed
+                if self.n_loc - block.shape[0] > 0:
+                    block = np.pad(block, ((0, self.n_loc - block.shape[0]), (0,0)))
+                                   
+                if self.m_loc - block.shape[1] > 0:
+                    block = np.pad(block, ((0,0), (0, self.m_loc - block.shape[1])))
+
+                # Copy block into grid
+                M[row*self.n_loc:(row+1)*self.n_loc, col*self.m_loc:(col+1)*self.m_loc] = block #.reshape(self.n_loc, self.m_loc)
+
+
+
+        return M[:self.n, :self.m] if remove_padding else M
+
+    @staticmethod
+    def from_numpy(M_numpy: np.ndarray, dtype=np.float64) -> 'pmat':
+        M_numpy = np.atleast_2d(M_numpy) if M_numpy is not None else None
+
+        n, m = M_numpy.shape       
+
+        coords = pmat.grid_comm.coords
+
+        ########################################################################
+        # Create a new pmat and its extent and position before reading 
+        # numpy array from shared memory
+        ########################################################################
+
+        M_pmat = pmat(n, m, dtype=dtype)
+        extent = M_pmat.extents[coords[0]][coords[1]]
+        position = M_pmat.offsets[coords[0]][coords[1]]
+
+        row_start, row_end = position[0], position[0] + extent[0]
+        col_start, col_end = position[1], position[1] + extent[1]
+
+        local = M_pmat.local    # Using full local array here (not just extent)
+
+        ########################################################################
+        # Set up the shared array
+        ########################################################################
+        type = M_pmat.dtype
+
+        type_bytes = np.dtype(type).itemsize
+        size = int(np.prod(M_pmat.shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=(M_pmat.n, M_pmat.m))
+
+        shared_array[:] = M_numpy[:]
+
+        ############################################################################
+        # Start an epoch and synchronize processes before reading
+        ############################################################################
+        win.Fence()
+
+        # Each rank reads its submatrix block from the shared array
+        local[:extent[0], :extent[1]] = shared_array[row_start:row_end, col_start:col_end]
+        M_pmat.local = local.copy()  # Added copy ... didn't fix the issue
+        
+        ############################################################################
+        # End the epoch and synchronize processes
+        ############################################################################
+        win.Fence()
+
+        # Free the shared memory
+        win.free()
+
+        return M_pmat
+
+    # @staticmethod
+    # def from_numpy(M_numpy: np.ndarray):
+    #     """
+    #     Convert a full numpy array to a distributed pmat
+    #     """
+    #     rank = pmat.grid_comm.Get_rank()
+    #     row, col = pmat.grid_comm.Get_coords(rank)
+        
+    #     n, m = M_numpy.shape
+
+    #     n_loc = np.ceil(n / pmat.grid_comm.dims[0]).astype(int)
+    #     m_loc = np.ceil(m / pmat.grid_comm.dims[1]).astype(int)
+       
+    #     row_start = row * n_loc
+    #     row_end = min((row + 1) * n_loc, n)
+    #     col_start = col * m_loc
+    #     col_end = min((col + 1) * m_loc, m)
+
+    #     block = M_numpy[row_start:row_end, col_start:col_end]
+        
+    #     # Pad with zeros
+    #     local = np.zeros((n_loc, m_loc), dtype=np.double)
+    #     # Copy from numpy block up to padding        
+    #     local[:block.shape[0], :block.shape[1]] = block
+
+    #     return pmat(n, m, local)
+    
+    @staticmethod
+    def resize(top: int, bottom: int, left: int, right: int, M: 'pmat'):
+        # grid_comm = create_grid_comm()
+        # new_M = pmat(bottom-top, right-left, grid_comm)   # start with all zeros
+
+        full = M.get_full()[top:bottom, left:right]
+        new_M = pmat.from_numpy(full)
+
+        return new_M
+
+    def pretty_string(self, name="", remove_padding=True, as_type=None):
+        # print("p_rows, p_cols:", p_rows, p_cols)
+        # print("n, m:", n, m)
+        # print("n_local, n_rem:", n_local, n_rem)
+        # print("m_local, m_rem:", m_local, m_rem)
+
+        if name != "":
+            if self.grid_comm.rank == 0:
+                print(f"{name}:")
+
+        if as_type is None:
+            if self.local.dtype == np.int32 or self.local.dtype == np.int64:
+                as_type = "i"
+            elif self.local.dtype == np.float32:
+                as_type = "f"
+            elif self.local.dtype == np.float64:
+                as_type = "d"
+            elif self.local.dtype == np.bool_:
+                as_type = "b"
+            else:
+                raise ValueError(f"Unsupported dtype for pretty print: {self.local.dtype}")
+
+        full_matrix = self.get_full(remove_padding)
+        matrix_str = ""            
+        
+        for row in range(self.n if remove_padding else self.n + self.n_pad):
+            col = 0
+
+            if row % self.n_loc == 0:
+                row_color = (row * self.m) // self.n_loc
+            while col < self.m:
+                color_code = 31 + ((row_color + col))   # 7 possible colors
+                # print(f"row {row} col {j} color {color_code}", flush=True)
+                
+                if as_type == "i":
+                    block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + self.m_loc])
+                elif as_type == "f" or as_type == "d":
+                    block_str = "\b" + "".join(f"{float(val):10.1f}" for val in full_matrix[row][col : col + self.m_loc])
+                elif as_type == "b":
+                    block_str = "\b" + "".join(f"{val}" for val in full_matrix[row][col : col + self.m_loc])                
+
+                if self.grid_comm.rank == 0:
+                    Pr = row // self.n_loc
+                    Pc = col // self.m_loc
+                    # color_code = 31 + (Pr + Pc) % 7  # 7 possible colors
+                    # set_text_color(color_code)
+                    palette = [196, 46, 220, 21, 208, 93, 226, 201, 202, 51, 82, 129, 214, 200, 198, 199]
+                    color_code = palette[(Pr + Pc * self.grid_comm.dims[1]) % len(palette)]
+
+                    matrix_str += f"\033[38;5;{color_code}m{block_str}\033[0m"
+                    matrix_str += " "
+                    
+                    # color_code = (Pr * pmatrix.grid_comm.dims[1] + Pc) * 13 % 256
+                    # print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+
+        
+                col += self.m_loc
+
+            # New line after each global row
+            if self.grid_comm.rank == 0:
+                matrix_str += "\n" 
+        
+        pmat.grid_comm.Barrier()
+        return matrix_str
+
+    def print_pretty(self, name="", remove_padding=True, as_type=None):
+        matrix_str = self.pretty_string(name, remove_padding, as_type)
+        if self.grid_comm.rank == 0:
+            print(matrix_str, flush=True)
+
+    ############################################################################
+    # Constructor
+    ############################################################################
+
+    def __init__(self, n, m, local=None, dtype=np.float64):
+    # def __init__(self, shape: tuple[int, int], local=None):
+
+        local = np.atleast_2d(local) if local is not None else None
+
+        Pr = pmat.grid_comm.dims[0]
+        Pc = pmat.grid_comm.dims[1]
+
+        self.n = n
+        self.m = m
+        self.shape = (n, m)
+        self.ndim = 2           # used in layer._as_2d
+        self.dtype = dtype
+        
+        self.rank = pmat.grid_comm.Get_rank()
+        self.coords = pmat.grid_comm.Get_coords(self.rank)
+
+        self.n_loc = ceil(self.n / Pr)
+        self.m_loc = ceil(self.m / Pc) 
+        self._local_shape = (self.n_loc, self.m_loc)
+
+        # Padding if n or m are not evenly divisible by Pr or Pc
+        _, self.n_pad = divmod(self.n, Pr)
+        _, self.m_pad = divmod(self.m, Pc)
+        self.is_padded = (self.n_pad > 0) or (self.m_pad > 0)
+
+        ########### Also in method self._set_local(local) ##################
+
+        # Local block will be (n_pad, m_pad) larger than local if there is zero padding.
+        self.local = np.zeros((self.n_loc, self.m_loc), dtype=dtype)
+        self.local = np.ascontiguousarray(self.local)
+        
+        if local is not None:
+            self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
+
+        
+        ####################### New Way (with extents) ########################
+        
+        # Block size
+        n_loc = int(np.ceil(n / Pr))
+        m_loc = int(np.ceil(m / Pc))
+
+        # Row extents
+        x, x_rem = divmod(n, n_loc)
+        n_loc_extent = [self.n_loc] * x
+        if x < Pr:
+            n_loc_extent += [x_rem]
+        n_loc_extent += [0] * (Pr - len(n_loc_extent))  # pad with zeros if needed
+
+        # Column extents
+        y, y_rem = divmod(m, m_loc)
+        m_loc_extent = [self.m_loc] * y
+        if y < Pc:
+            m_loc_extent += [y_rem]
+        m_loc_extent += [0] * (Pc - len(m_loc_extent))  # pad with zeros if needed
+
+        # If the extent's row size -- or -- column size is zero, the block is empty
+        extent = [[(0, 0) if a == 0 or b == 0 else (a, b) for b in m_loc_extent] for a in n_loc_extent]
+
+        # extent = [[(a, b) for b in m_loc_extent] for a in n_loc_extent]
+
+
+        n_loc_pos = [0]
+        for v in n_loc_extent[:-1]:
+            n_loc_pos.append(n_loc_pos[-1] + v)
+
+        m_loc_pos = [0]
+        for v in m_loc_extent[:-1]:
+            m_loc_pos.append(m_loc_pos[-1] + v)
+
+        offsets = [[(a,b) for b in m_loc_pos] for a in n_loc_pos]
+        self.extents = extent
+        self.offsets = offsets
+
+        self.block_extent = extent[self.coords[0]][self.coords[1]]
+        self.block_offset = offsets[self.coords[0]][self.coords[1]]
+
+        # Count number of non-empty blocks in each process dimension
+        nonempty_in_row = sum(1 for i in range(Pr) if extent[i][0][0] > 0)
+        nonempty_in_col = sum(1 for j in range(Pc) if extent[0][j][1] > 0)
+
+
+        self.nonempty_processes = (nonempty_in_row, nonempty_in_col)
+
+        ### Create subcommunicator for non-empty blocks only
+        coords = self.coords
+        grid = self.grid_comm
+
+        # Decide if THIS rank’s block is non-empty
+        extent   = self.extents[coords[0]][coords[1]]
+        has_work = int(extent[0] > 0 and extent[1] > 0)  # 1 if non-empty
+
+        row_all = grid.Sub([False, True])   # all ranks in my row
+        col_all = grid.Sub([True,  False])  # all ranks in my column
+
+        # Use MPI.UNDEFINED to drop ranks with no work
+        row_color = 0 if has_work else MPI.UNDEFINED
+        col_color = 0 if has_work else MPI.UNDEFINED
+
+        self.row_comm = row_all.Split(color=row_color, key=coords[1])
+        self.col_comm = col_all.Split(color=col_color, key=coords[0])
+
+        row_all.Free()
+        col_all.Free()
+
+    def __del__(self):
+     # Destructor: free communicators safely
+        for comm in (getattr(self, 'row_comm', None), getattr(self, 'col_comm', None)):
+            if comm is not None and comm != MPI.COMM_NULL:
+                try:
+                    comm.Free()
+                except MPI.Exception:
+                    # It might already be freed or invalid during MPI_Finalize
+                    pass
+    def copy(self):
+        # Deep copy
+        new_pmat = pmat(self.n, self.m, self.local.copy(), dtype=self.local.dtype)
+        return new_pmat
+    
+    def __copy__(self):
+        return self.copy()
+    
+    def __deepcopy__(self, memo):
+        # p_matrix only contains numpy arrays and primitive types, so a deep copy is the same as a shallow copy
+        return self.copy()
+    ############################################################################
+    # Accessors and string representations
+    ############################################################################
+
+    def __repr__(self):
+        return f"pmat({self.n}x{self.m}) at coords {self.coords} with local shape {self.local.shape})"
+    
+    def __str__(self):
+        return f"{self.get_full()}"
+    
+    def astype(self, dtype):
+        return pmat(self.n, self.m, self.local.astype(dtype))
+    
+    def __getitem__(self, idx):
+
+        idx = normalize_index(idx)
+
+        if isinstance(idx, np.ndarray) and idx.ndim == 1:
+            # 1D array indexing is treated as row indexing
+            idx = np.atleast_2d(idx)
+            return pmat.fancy_indexing_rows(self, idx)
+
+        # idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+        # idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+        # # assert(len(idx0) == len(idx1))
+
+        local_values = []
+        for (global_i, global_j) in zip(idx[0], idx[1]):
+                rank_i, block_i = divmod(global_i, self.n_loc)
+                rank_j, block_j = divmod(global_j, self.m_loc)
+                
+                if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+                    local_values.append(self.local[block_i, block_j])
+
+        local_values = np.array(local_values, dtype=self.local.dtype)
+
+        
+        global_values = self.grid_comm.allgather(local_values)
+        # Filter out empty blocks
+        non_empty_lists = [lst for lst in global_values if len(lst)!= 0] 
+        # if self.rank==0:
+        #     print("local_values:", local_values)
+        #     print("local_values shapes:", [np.array(lv).shape for lv in global_values])
+        # exit()
+
+        global_values = np.concatenate([np.array(lst, dtype=self.dtype) for lst in non_empty_lists])
+        return global_values
+
+    def __setitem__(self, idx, value):
+        idx = normalize_index(idx)
+
+        idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+        idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+
+        for (global_i, global_j) in zip(idx0, idx1):
+
+            rank_i, block_i = divmod(global_i, self.n_loc)
+            rank_j, block_j = divmod(global_j, self.m_loc)
+                
+            if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+                self.local[block_i, block_j] = value
+
+        return
+
+
+    # def __getitem__(self, idx):
+    #     #### Keep as get_full for now ... optimize later ####
+    #     numpy_result = self.get_full()[idx]
+    #     return numpy_result
+        
+    #     # idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+    #     # idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+    #     # assert(len(idx0) == len(idx1))
+
+    #     # local_values = []
+    #     # for (global_i, global_j) in zip(idx0, idx1):
+    #     #         rank_i, block_i = divmod(global_i, self.n_loc)
+    #     #         rank_j, block_j = divmod(global_j, self.m_loc)
+                
+    #     #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+    #     #             local_values.append(self.local[block_i, block_j])
+
+    #     # local_values = np.array(local_values, dtype=self.local.dtype)
+
+    #     # padded = np.full(len(idx0), np.nan, dtype=self.local.dtype)
+    #     # padded[:len(local_values)] = local_values
+
+    #     # global_values = np.array((1, len(idx0)), dtype=self.local.dtype)
+    #     # self.grid_comm.Allgather(padded, global_values)
+
+    #     # if not np.allclose(np.array(local_values), numpy_result):
+    #     #     raise ValueError(f"pmat __getitem__ mismatch with numpy result\n")
+
+    #     return local_values
+
+    # def __setitem__(self, idx, value):
+    #     before_loop = self.get_full()
+    #     before_loop[idx] = value
+
+    #     idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
+    #     idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
+
+    #     for (global_i, global_j) in zip(idx0, idx1):
+
+    #         rank_i, block_i = divmod(global_i, self.n_loc)
+    #         rank_j, block_j = divmod(global_j, self.m_loc)
+                
+    #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
+    #             self.local[block_i, block_j] = value
+
+    #     if not np.allclose(self.get_full(), before_loop):
+    #         raise ValueError(f"pmat __setitem__ failed to set value correctly:\n")
+        
+    # ############################################################################
+
+    def remove_first_column(self):
+    
+        col_offset = 1  # remove first column
+
+        assert self.m > 1, "matrix only has one column"
+                
+        n, m = self.shape        
+        
+        coords = pmat.grid_comm.coords
+        extent = self.extents[coords[0]][coords[1]]
+        position = self.offsets[coords[0]][coords[1]]
+
+        row_start, row_end = position[0], position[0] + extent[0]
+        col_start, col_end = position[1], position[1] + extent[1]
+
+        local = self.local[:extent[0], :extent[1]]
+
+        # Set up the submatrix
+        submat = pmat(n, m - 1, dtype=self.dtype)
+        submat_extent = submat.extents[coords[0]][coords[1]]
+        submat_position = submat.offsets[coords[0]][coords[1]]
+
+        submat_row_start, submat_row_end = submat_position[0], submat_position[0] + submat_extent[0]
+        submat_col_start, submat_col_end = col_offset + submat_position[1], col_offset + submat_position[1] + submat_extent[1]
+
+        submat_local = np.zeros_like(submat.local)
+
+        ########################################################################
+        # Write each rank's local block to the shared array
+        ########################################################################
+        type = self.local.dtype
+        type_bytes = np.dtype(type).itemsize
+        size = int(np.prod(self.shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=(self.n, self.m))
+
+        # Start an epoch and synchronize processes before writing
+        win.Fence()
+
+        # Each rank writes its original matrix block to the shared array
+        shared_array[row_start:row_end, col_start:col_end] = local
+
+        ############################################################################
+        # End the epoch and synchronize processes (again) before reading
+        ############################################################################
+        
+        win.Fence()
+        
+        # Each rank reads its submatrix block from the shared array
+        submat_local[:submat_extent[0], :submat_extent[1]] = shared_array[submat_row_start:submat_row_end, submat_col_start:submat_col_end]
+        submat.local = submat_local.copy()  # Added copy ... didn't fix the issue
+        
+        ############################################################################
+        # End the epoch and synchronize processes
+        ############################################################################
+        win.Fence()
+
+        # Free the shared memory
+        win.free()
+
+        return submat    
+
+
+
+    ############################################################################
+    # Arithmetic operators
+    ############################################################################
+    @staticmethod
+    def check_for_broadcast(A: 'pmat', B: 'pmat'):
+        # Python broadcasting expands a smaller array (a vector) to match a larger array (a matrix)
+
+        ########################################################################
+        # Scalar broadcasting
+        
+        if np.isscalar(B):
+            A_extent = A.extents[A.coords[0]][A.coords[1]]
+            A_local = A.local[:A_extent[0], :A_extent[1]]
+
+            return A_local, B, (A.n, A.m)
+        elif np.isscalar(A):
+            B_extent = B.extents[B.coords[0]][B.coords[1]]
+            B_local = B.local[:B_extent[0], :B_extent[1]]
+
+            return A, B_local, (B.n, B.m)
+
+        
+        # Operands are without padding
+        A_extent = A.extents[A.coords[0]][A.coords[1]]
+        A_local = A.local[:A_extent[0], :A_extent[1]]
+        
+        B_extent = B.extents[B.coords[0]][B.coords[1]]
+        B_local = B.local[:B_extent[0], :B_extent[1]]
+
+        # Output shape is a matrix
+        output_shape = (max(A.n, B.n), max(A.m, B.m))
+
+        ########################################################################
+        # Row vector and column vector broadcasting. 
+        # In the process grid, a vector has empty blocks where the matrix 
+        # has non-empty blocks, so we need to broadcast its nonempty blocks
+        # downward (columns) or rightward (rows) from the root of the matrix's
+        # column and row subcommunicators.
+        
+        if B.shape == (A.n, 1) and B.m != A.m:  
+            if A.row_comm == MPI.COMM_NULL:
+                return A_local, A_local, output_shape
+            else:
+                B_local = A.row_comm.bcast(B_local, root=0)
+                return A_local, B_local, output_shape
+        elif A.shape == (B.n, 1) and A.m != B.m:           
+            if B.row_comm == MPI.COMM_NULL:
+                return B_local, B_local, output_shape
+            else:
+                A_local = B.row_comm.bcast(A_local, root=0)
+                return A_local, B_local, output_shape
+        elif B.shape == (1, A.m) and B.n != A.n:  
+            if A.col_comm == MPI.COMM_NULL:
+                return A_local, A_local, output_shape
+            else:         
+                B_local = A.col_comm.bcast(B_local, root=0)
+                return A_local, B_local, output_shape
+        elif A.shape == (1, B.m) and A.n != B.n:
+            if B.col_comm == MPI.COMM_NULL:
+                return B_local, B_local, output_shape
+            else:
+                A_local = B.col_comm.bcast(A_local, root=0)
+                return A_local, B_local, output_shape
+            
+            
+        
+        # Originally: col_comm and row_comm switched
+        # if B.shape == (A.n, 1) and B.m != A.m:  
+        #   if A.col_comm == MPI.COMM_NULL:
+        #         return A_local, A_local, output_shape
+        #     else:
+        #         B_local = A.row_comm.bcast(B_local, root=0)
+        #         return A_local, B_local, output_shape
+        # elif A.shape == (B.n, 1) and A.m != B.m:           
+        #     if B.col_comm == MPI.COMM_NULL:
+        #         return B_local, B_local, output_shape
+        #     else:
+        #         A_local = B.col_comm.bcast(A_local, root=0)
+        #         return A_local, B_local, output_shape
+        # elif B.shape == (1, A.m) and B.n != A.n:  
+        #     if A.row_comm == MPI.COMM_NULL:
+        #         return A_local, A_local, output_shape
+        #     else:         
+        #         B_local = A.row_comm.bcast(B_local, root=0)
+        #         return A_local, B_local, output_shape
+        # elif A.shape == (1, B.m) and A.n != B.n:
+        #     if B.row_comm == MPI.COMM_NULL:
+        #         return B_local, B_local, output_shape
+        #     else:
+        #         A_local = B.row_comm.bcast(A_local, root=0)
+        #         return A_local, B_local, output_shape
+
+        #######################################################################
+        # Nevermind: Both are matrices or both are vectors of the same shape
+        else:
+            return A_local, B_local, output_shape
+
+
+    def __gt__(self, other):
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.greater(A,  B))
+
+        # return pmat(self.n, self.m, self.local > other)
+
+    def __eq__(self, other):
+
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.equal(A,  B), dtype=np.bool_)
+
+        # return pmat(self.n, self.m, self.local > other)
+    
+    def __add__(self, other): 
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.add(A,  B))
+
+    def __sub__(self, other):     
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.subtract(A, B))
+
+
+    def __mul__(self, other):
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.multiply(A, B))
+    
+    def __rmul__(self, other):
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.multiply( B, A))
+        
+    def __truediv__(self, other):
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.true_divide(A, B))
+    
+    def __rdiv__(self, other):
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.true_divide(A, B))
+    
+    def __rtruediv__(self, other):
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+
+        return pmat(output_shape[0], output_shape[1], np.true_divide(B, A))
+
+    def __radd__(self, other):
+        A, B, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.add(B, A))
+    
+
+    ##### failed in test.py..... ########
+    def __rsub__(self, other):
+        left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
+        
+        return pmat(output_shape[0], output_shape[1], np.subtract( right_operand, left_operand))
+
+        # # Handle scalar + pmat (right addition)
+        # if np.isscalar(other):
+        #     return pmat(self.n, self.m, other - self.local)
+        # else:
+        #     return NotImplemented
+
+    def __neg__(self):
+        return pmat(self.n, self.m, -self.local)
+
+    def __matmul__(self, other: 'pmat'):
+        
+
+
+        return matmul(self, other)
+
+        # Cannon's Algorithm
+
+        assert self.m == other.n, f"A @ B: A.m  = {self.m} and B.n = {other.n}"
+
+        C = np.zeros((self.n_loc, other.m_loc))
+
+        # Total steps over grid 
+        num_steps = min(pmat.grid_comm.dims)
+
+        # Deep copies for Sendrecv_replace
+        A = self.local.copy()
+        B = other.local.copy()
+
+        # Skew (initial alignment)
+        for _ in range(self.coords[0]):
+            src, dst = pmat.grid_comm.Shift(1, -1)
+            pmat.grid_comm.Sendrecv_replace(A, dest=dst, source=src)
+
+        for _ in range(self.coords[1]):
+            src, dst = pmat.grid_comm.Shift(0, -1)
+            pmat.grid_comm.Sendrecv_replace(B, dest=dst, source=src)
+
+        for _ in range(num_steps):
+            # Multiply and accumulate
+            C += A @ B
+
+            # Shift A left
+            src, dst = pmat.grid_comm.Shift(1, -1)
+            pmat.grid_comm.Sendrecv_replace(A, dest=dst, source=src)
+
+            # Shift B up
+            src, dst = pmat.grid_comm.Shift(0, -1)
+            pmat.grid_comm.Sendrecv_replace(B, dest=dst, source=src)
+
+        return pmat(self.n, other.m, local=C)
+    
+    @property
+    def T(self):        
+        ########################################################################
+        # 1. Each process computes the local transpose of its block:
+        #                       A[i][j].T
+        ########################################################################
+
+        # Receiving type
+        row_type = MPI.DOUBLE.Create_vector(self.n_loc, self.m_loc, self.m_loc)
+        row_type.Commit()
+
+        # Sending type
+        col_type = MPI.DOUBLE.Create_vector(self.n_loc, 1, self.m_loc)        
+        col_type.Commit()
+
+        # Sending type
+        # Repeat the column type by the number of columns (m_loc times) with a stride in bytes (unlike vector)
+        mult_col_type = col_type.Create_hvector(self.m_loc, 1, self.local.dtype.itemsize)
+        mult_col_type.Commit()
+
+        ########################################################################
+        # 2. Each process exchanges its local transpose with its transpose 
+        # partner:
+        #                   A[i][j].T <-> A[j][i].T 
+        ########################################################################
+
+        # Transpose partner process in grid
+        other = pmat.grid_comm.Get_cart_rank([self.coords[1], self.coords[0]])
+
+        # For a non-square matrix, we need a separate destination array.
+        local_transpose = np.zeros((self.m_loc, self.n_loc))
+        # local_transposed = np.ascontiguousarray(local_transposed)
+
+        # if rank == 0:
+        #     # Bytes described by datatype
+        #     print("dtype bytes:", mult_col_type.Get_size())
+        #     print("send nbytes:", self.local.nbytes)
+        #     print("recv nbytes:", local_transpose.nbytes)
+
+        pmat.grid_comm.Sendrecv([self.local, 1, mult_col_type], dest=other, source=other, recvbuf=[local_transpose, 1, row_type])
+
+        # Free datatypes
+        mult_col_type.Free()
+        col_type.Free()
+        
+        row_type.Free()
+        
+        # Transpose dimensions
+        return pmat(self.m, self.n, local_transpose, dtype=self.dtype) 
+
+
+    ############################################################################
+    # Universal functions (np.exp, np.add, etc.)
+    ############################################################################
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        extent = self.extents[self.coords[0]][self.coords[1]]
+        local = self.local[:extent[0], :extent[1]]
+
+        # Convert inputs to arrays
+        arrays = [np.asarray(local) if isinstance(x, pmat) else x
+                  for x in inputs]
+
+        with warnings.catch_warnings(record=True) as w:
+            result = getattr(ufunc, method)(*arrays, **kwargs)
+
+        for warning in w:
+            if issubclass(warning.category, RuntimeWarning):
+                
+                local_str = f"\nOriginal local:\n{self.local}\n\nResult matrix:\n{result}"
+
+                print(f"\033[91m{pmat.grid_comm.coords}: Caught a RuntimeWarning: {warning.message}\033[0m")
+
+                # pmat.grid_comm.Abort(-1)
+
+        
+        # Return result in a pmat
+        if isinstance(result, np.ndarray):
+            return pmat(self.n, self.m, result)
+        else:
+            return result
+
+
+    ############################################################################
+    # Handle non-ufunc NumPy functions (np.mean, np.concatenate, etc.)
+    ############################################################################
+
+    def __array_function__(self, func, types, args, kwargs):
+        """
+        Called for non-ufunc NumPy functions that support the array function protocol.
+        """
+        if func is np.zeros_like:
+            other = args[0]
+            if isinstance(other, pmat):
+                return pzeros_like(other, **kwargs)
+        elif func is np.ones_like:
+            other = args[0]
+            if isinstance(other, pmat):
+                return p_ones_like(other, **kwargs)
+        elif func is np.max:
+            other = args[0]
+            if isinstance(other, pmat):
+                return self.pmax(other, **kwargs)
+        elif func is np.argmax:
+            other = args[0]
+            if isinstance(other, pmat):
+                return self.pargmax(other, **kwargs)    
+        elif func is np.sum:
+            other = args[0]
+            if isinstance(other, pmat):
+                return self.psum(other, **kwargs)
+        elif func is np.mean:
+            other = args[0]
+            if isinstance(other, pmat):
+                return self.pmean(other, **kwargs)
+        elif func is np.maximum:
+            other = args[0]
+            if isinstance(other, self.local.dtype):     # scalar
+                return self.pmaximum(other, **kwargs)
+
+        raise NotImplementedError(f"{func} not implemented for pmat")
+    
+    ############################################################################
+    # Non-ufunc pmat functions (sum, mean, max, maximum, etc.)
+    ############################################################################
+
+
+
+    def psum(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        # assert axis == 1, f'Only axis=1 (row-wise) is supported for psum'
+
+
+        if axis == 1:
+            dtype = self.dtype
+            coords = self.coords
+            extent = self.extents[coords[0]][coords[1]]
+            local = self.local[:extent[0], :extent[1]]
+
+            row_sum = []
+            if self.row_comm != MPI.COMM_NULL:
+                for row in range(extent[0]):
+                    # Reduce to the root of each group
+                    local_sum = np.sum(local[row, :])
+                    row_sum.append(self.row_comm.reduce(local_sum, op=MPI.SUM, root=0))
+
+                if self.grid_comm.coords[1] == 0:
+                    row_sum = np.array([x for x in row_sum if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # row_sum is now a column vector
+                else:
+                    row_sum = None
+            else:
+                row_sum = None
+
+            return pmat(self.n, 1, row_sum)
+        elif axis == None:
+            grid = self.grid_comm
+
+            # Global sum
+            coords = self.coords
+            extent = self.extents[coords[0]][coords[1]]
+            local = self.local[:extent[0], :extent[1]]
+
+            local_sum = np.sum(local)
+                        
+            global_sum = grid.allreduce(local_sum, op=MPI.SUM)
+            return global_sum
+        else:
+            raise NotImplementedError("psum axis=0 not implemented yet")
+
+    def pmin(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        if axis == 1:
+            
+            if self.row_comm != MPI.COMM_NULL:
+                dtype = self.dtype
+                coords = self.coords
+                extent = self.extents[coords[0]][coords[1]]
+                local = self.local[:extent[0], :extent[1]]
+
+                row_min = []
+
+                for row in range(extent[0]):
+                    # Reduce to the root of each group
+                    local_min = np.min(local[row, :])
+                    row_min.append(self.row_comm.reduce(local_min, op=MPI.MIN, root=0))
+
+                if self.grid_comm.coords[1] == 0:
+                    row_min = np.array([x for x in row_min if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # maxs is now a column vector
+                else:
+                    row_min = None
+            else:
+                row_min = None
+
+            return pmat(self.n, 1, row_min)
+    
+        elif axis is None:
+            # Global min
+            global_min = self.grid_comm.allreduce(np.min(self.local), op=MPI.MIN)
+            return global_min      # return scalar value (not pmat)
+        else:
+            raise ValueError(f"Invalid axis {axis} for pmin")
+        
+    def pmax(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        if axis == 1:
+            
+            if self.row_comm != MPI.COMM_NULL:
+                dtype = self.dtype
+                coords = self.coords
+                extent = self.extents[coords[0]][coords[1]]
+                local = self.local[:extent[0], :extent[1]]
+
+                row_max = []
+
+                for row in range(extent[0]):
+                    # Reduce to the root of each group
+                    local_max = np.max(local[row, :])
+                    row_max.append(self.row_comm.reduce(local_max, op=MPI.MAX, root=0))
+
+                if self.grid_comm.coords[1] == 0:
+                    row_max = np.array([x for x in row_max if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1) # maxs is now a column vector
+                else:
+                    row_max = None
+            else:
+                row_max = None
+
+            return pmat(self.n, 1, row_max)
+    
+        elif axis is None:
+            # Global max
+            global_max = self.grid_comm.allreduce(np.max(self.local), op=MPI.MAX)
+            return global_max      # return scalar value (not pmat)
+        else:
+            raise ValueError(f"Invalid axis {axis} for pmax")
+    
+    def pargmax(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        assert axis == 1, f'Only axis=1 (row-wise) is supported for pmax'
+
+        if axis == 1:
+            ############## Slower using allgather than below ###################
+            # subgrid = self.subgrid
+
+            # dtype = self.dtype
+            # coords = self.coords
+            # position = self.position[coords[0]][coords[1]]
+            # extent = self.extent[coords[0]][coords[1]]
+            # local = self.local[:extent[0], :extent[1]]
+            # num_rows = self.block_size[0]
+
+            # result = np.zeros((extent[0], 2), dtype=(np.int64, self.dtype))
+            
+            # if subgrid == MPI.COMM_NULL:
+            #     # Return type is np.int64 for argmax
+            #     return pmat(self.n, 1, local=None, dtype=np.int64)
+
+            # else:
+            #     horz_comm = subgrid.Sub([False, True])  # rows
+
+            #     for row in range(num_rows): 
+                    
+            #         local_max = dtype(np.max(local[row, :]))
+            #         local_idx = np.int64(np.argmax(local[row, :]))
+            #         global_idx = np.int64(local_idx + position[1])
+
+
+            #         row_max_combined = np.zeros((1, horz_comm.size), dtype=dtype)
+            #         row_idx_combined = np.zeros((1, horz_comm.size), dtype=np.int64)
+
+            #         horz_comm.Allgather(local_max, row_max_combined)
+            #         horz_comm.Allgather(global_idx, row_idx_combined)
+
+            #         idx = np.argmax(row_max_combined)
+            #         result[row, 0] = row_idx_combined.flatten()[idx]
+            #         result[row, 1] = row_max_combined.flatten()[idx]
+
+            #     argmax = result[:,0].reshape(num_rows, 1)
+
+            #     # Return type is np.int64 for argmax
+            #     return pmat(self.n, 1, local=argmax, dtype=np.int64)
+
+            #### Slightly faster to use allreduce #########################
+            dtype = self.dtype
+            coords = self.coords
+            position = self.offsets[coords[0]][coords[1]]
+            extent = self.extents[coords[0]][coords[1]]
+            local = self.local[:extent[0], :extent[1]]
+            num_rows = self.block_extent[0]
+
+            result = np.zeros((extent[0], 2), dtype=(np.int64, self.dtype))
+            
+            if self.row_comm == MPI.COMM_NULL:
+                # Return type is np.int64 for argmax
+                return pmat(self.n, 1, local=None, dtype=np.int64)
+
+            else:
+                for row in range(num_rows): 
+                    
+                    local_max = dtype(np.max(local[row, :]))
+                    local_idx = np.int64(np.argmax(local[row, :]))
+                    global_idx = np.int64(local_idx + position[1])
+
+                    mpi_dtype = np.dtype([('value', np.float64), ('index', np.int32)], align=True)
+                    sendbuf = np.array([(local_max, global_idx)], dtype=mpi_dtype)  
+                    recvbuf = np.array([(0.0, 0)], dtype=mpi_dtype)
+
+                    # Allreduce with MAXLOC
+                    self.row_comm.Allreduce([sendbuf, MPI.DOUBLE_INT], [recvbuf, MPI.DOUBLE_INT], op=MPI.MAXLOC)
+
+                    result[row,:] = recvbuf['index'][0]
+
+                argmax = result[:,0].reshape(num_rows, 1)
+
+                # Return type is np.int64 for argmax
+                return pmat(self.n, 1, local=argmax, dtype=np.int64)
+
+    def pmean(self, *args, **kwargs):
+        axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
+
+        if axis == 0:
+            raise NotImplementedError("pmean axis=0 not implemented yet")
+        elif axis == 1:
+            # horz_group = self.grid_comm.Sub([False, True])  # rows
+
+            # dtype = self.dtype
+            # coords = self.coords
+            # extent = self.extent[coords[0]][coords[1]]
+            # local = self.local[:extent[0], :extent[1]]
+
+            # row_mean = []
+
+            # for row in range(extent[0]):
+            #     # Reduce to the root of each group
+            #     local_row_sum = np.sum(self.local[row, :])
+            #     row_mean.append(horz_group.reduce(local_row_sum, op=MPI.SUM, root=0))
+
+            # if self.grid_comm.coords[1] == 0:
+            #     # Remove Nones and make a column vector
+            #     row_mean = np.array([x for x in row_mean if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1)
+                
+            #     # Divide by total number of columns
+            #     row_mean = row_mean / self.m
+            # else:
+            #     # Process is not a root
+            #     row_mean = None
+            # return pmat(self.n, 1, row_mean)
+
+            return self.psum(axis=1) / self.m
+
+        elif axis is None:
+            # Global mean
+            total_sum = self.grid_comm.allreduce(np.sum(self.local), op=MPI.SUM)
+            global_mean = total_sum / (self.n * self.m)
+            return global_mean      # return scalar value (not pmat)
+        else:
+            raise ValueError(f"Invalid axis {axis} for pmean")
+        
+    def pmaximum(self, scalar, *args, **kwargs):
+        return pmat(self.n, self.m, np.maximum(scalar, self.local, *args, **kwargs))
+    
+
+    def stack_ones_on_top(self: 'pmat') -> 'pmat':
+
+        # row_offset = 1  # add to first row
+        coords = pmat.grid_comm.coords
+        n, m = self.shape        
+        
+        # Set up the extented matrix
+        newmat = pmat(n + 1, m, dtype=self.dtype)
+        newmat_extent = newmat.extents[coords[0]][coords[1]]
+        newmat_position = newmat.offsets[coords[0]][coords[1]]
+
+        newmat_row_start, newmat_row_end = newmat_position[0], newmat_position[0] + newmat_extent[0]
+        newmat_col_start, newmat_col_end = newmat_position[1], newmat_position[1] + newmat_extent[1]
+
+        newmat_local = newmat.local
+
+        ########################################################################
+        # Write each rank's local block to the shared array offset by one row
+        ########################################################################
+        extent = self.extents[coords[0]][coords[1]]
+        position = self.offsets[coords[0]][coords[1]]
+
+        row_start, row_end = position[0] + 1, position[0] + extent[0] + 1
+        col_start, col_end = position[1], position[1] + extent[1]
+
+        local = self.local[:extent[0], :extent[1]]
+        
+        type = self.local.dtype
+        type_bytes = np.dtype(type).itemsize
+        shape = (n + 1, m)
+        size = int(np.prod(shape)) * type_bytes
+
+        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+        assert win is not None, "win is None"
+            
+        # Buffer is allocated by rank 0, but all processes can access it
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=type, shape=shape)
+
+        shared_array[0,:] = 1  # First row of ones
+        
+        ############################################################################
+        # Start an epoch and synchronize processes before writing
+        ########################################################################### 
+        win.Fence()
+        
+        # Each rank writes its original matrix block to the shared array
+        shared_array[row_start:row_end, col_start:col_end] = local
+
+        ############################################################################
+        # End the epoch and synchronize processes (again) before reading
+        ############################################################################
+        win.Fence()
+        
+        # Each rank reads its submatrix block from the shared array
+        newmat_local[:newmat_extent[0], :newmat_extent[1]] = shared_array[newmat_row_start:newmat_row_end, newmat_col_start:newmat_col_end]
+        newmat.local = newmat_local
+        
+        ############################################################################
+        # End the epoch and synchronize processes
+        ############################################################################
+        win.Fence()
+
+        # Free the shared memory
+        win.free()
+
+        return newmat
+
+
+
+
+############################################################################
+# Utility functions
+############################################################################
+
+def pzeros_like(M_pmat: pmat) -> pmat:
+    newmat = pmat(M_pmat.n, M_pmat.m)
+
+    coords = pmat.grid_comm.coords
+    extent = newmat.extents[coords[0]][coords[1]]
+
+    newmat.local[:extent[0], :extent[1]] = np.zeros((extent[0], extent[1]))
+
+    return newmat
+
+def p_ones_like(M_pmat: pmat) -> pmat:
+    newmat = pmat(M_pmat.n, M_pmat.m)
+
+    coords = pmat.grid_comm.coords
+    extent = newmat.extents[coords[0]][coords[1]]
+
+    newmat.local[:extent[0], :extent[1]] = np.ones((extent[0], extent[1]))
+
+    return newmat
+
+
+
+############################################################################
+# Matrix-matrix multiplication function
+############################################################################
+
+def matmul(A: pmat, B: pmat):
+    assert A.m == B.n, f"A @ B: A.m:{A.m} != B.n:{B.n}"
+
+
+
+    # Cannon's Algorithm
+    
+    C = np.zeros((A.n_loc, B.m_loc))
+
+    # Total steps over grid 
+    num_steps = min(pmat.grid_comm.dims)
+
+    # Deep copies for Sendrecv_replace
+    A_block = A.local.copy()
+    B_block = B.local.copy()
+
+    # Skew (initial alignment)
+    for _ in range(A.coords[0]):
+        src, dst = pmat.grid_comm.Shift(1, -1)
+        pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
+
+    for _ in range(A.coords[1]):
+        src, dst = pmat.grid_comm.Shift(0, -1)
+        pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
+
+    for _ in range(num_steps):
+        # Multiply and accumulate
+        C += A_block @ B_block
+
+        # Shift A left
+        src, dst = pmat.grid_comm.Shift(1, -1)
+        pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
+
+        # Shift B up
+        src, dst = pmat.grid_comm.Shift(0, -1)
+        pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
+
+    return pmat(A.n, B.m, local=C)
+
+
+
+
+
+
+if __name__ == "__main__":
+#     # Test input
+
+        # Large matrices
+#     test(n=1000, k=2000, m=10000)
+
+#     test(n=28*28, k=64, m=64)
+
+    # Non-square matrices
+    test(n=9, k=5, m=16)
+
+    # Square matrices
+    test(n=8, k=8, m=16)
+
+
+
+
+
