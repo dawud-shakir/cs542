@@ -11,6 +11,18 @@ mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
 mpl.rcParams['svg.fonttype'] = 'none'
 
+# set global font sizes
+mpl.rcParams.update({
+    'font.size': 18,
+    'axes.titlesize': 18,
+    'axes.labelsize': 18,
+    'xtick.labelsize': 18,
+    'ytick.labelsize': 18,
+    'legend.fontsize': 18,
+})
+
+# font_size_above_bar = 10
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -50,12 +62,12 @@ for i, (offset, vals) in enumerate(zip(offsets, vals_per_proc)):
     bars.append(b)
 
 # annotate each bar with its value
-for b_group in bars:
-    for rect in b_group:
-        h = rect.get_height()
-        # place label slightly above for positive heights; adjust for symlog spacing
-        y = h * (1.05 if h > 0 else 0.95)
-        ax.text(rect.get_x() + rect.get_width() / 2, y, f"{h:.1f} s", ha="center", va="bottom", fontsize=8, rotation=0)
+# for b_group in bars:
+#     for rect in b_group:
+#         h = rect.get_height()
+#         # place label slightly above for positive heights; adjust for symlog spacing
+#         y = h * (1.05 if h > 0 else 0.95)
+#         ax.text(rect.get_x() + rect.get_width() / 2, y, f"{h:.1f} s", ha="center", va="bottom", fontsize=font_size_above_bar, rotation=0)
 
 ax.set_xticks(x)
 ax.set_xticklabels(matrix_labels)
@@ -64,7 +76,8 @@ ax.set_ylabel("Time (s, log scale)")
 # ax.set_title("Epoch time by hidden-layer size and process count")
 ax.set_title("Mean Per Process Epoch Time\nBatches Per Epoch: 60,  Batch Size: 1,000")
 
-ax.legend(title="Processes", bbox_to_anchor=(1.02, 1), loc="upper left")
+ax.legend(title="Processes", loc="upper left")
+# ax.legend(title="Processes", bbox_to_anchor=(1.02, 1), loc="upper left")
 ax.grid(True, which="both", axis="y", ls=":", lw=0.6)
 
 plt.tight_layout()

@@ -297,6 +297,12 @@ class pmat:
             self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
 
     def set_full(self, M):
+        """
+        split a global matrix into blocks and scatter those blocks from rank 0 to all ranks
+        
+        :param self: Description
+        :param M: Description
+        """
         blocks = []
         for i in range(pmat.grid_comm.dims[0]):
             for j in range(pmat.grid_comm.dims[1]):
@@ -349,6 +355,10 @@ class pmat:
 
         n, m = M_numpy.shape       
 
+        # M_pmat = pmat(n, m, dtype=M_numpy.dtype)
+        # M_pmat.set_full(M_numpy)      #<---- use scatter after this instead
+        # return M_pmat
+    
         coords = pmat.grid_comm.coords
 
         ########################################################################

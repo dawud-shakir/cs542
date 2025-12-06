@@ -1,6 +1,7 @@
 # bar_plot.py
 # Create bar plot showing epoch times for different hidden layer sizes and process counts
 
+import colorsys
 from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent # plots folder
 FIG_PATH = ROOT_DIR / "memory_plot.pdf"
@@ -10,6 +11,16 @@ import matplotlib as mpl
 mpl.rcParams['pdf.fonttype'] = 42
 mpl.rcParams['ps.fonttype'] = 42
 mpl.rcParams['svg.fonttype'] = 'none'
+
+# set global font sizes
+mpl.rcParams.update({
+    'font.size': 18,
+    'axes.titlesize': 18,
+    'axes.labelsize': 18,
+    'xtick.labelsize': 18,
+    'ytick.labelsize': 18,
+    'legend.fontsize': 18,
+})
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,7 +51,21 @@ bar_width = 0.18
 # center the group of bars on each x tick
 offsets = (np.arange(n_procs) - (n_procs - 1) / 2) * bar_width
 
-colors = plt.get_cmap("tab10").colors   # blue, orange, green red
+# colors = plt.get_cmap("tab10").colors   # blue, orange, green red
+
+def tweak_tab10(contrast=1.2, lighten=0.0):
+    base = np.array(plt.get_cmap("tab10").colors)
+    out = []
+    for r,g,b in base:
+        h,l,s = colorsys.rgb_to_hls(r,g,b)
+        l = np.clip(l * contrast + lighten, 0, 1)   # boost/dim luminance
+        s = np.clip(s * contrast, 0, 1)             # boost/dim saturation
+        out.append(colorsys.hls_to_rgb(h, l, s))
+    return out
+
+# use contrast>1 for stronger colors, <1 to soften; lighten positive to brighten
+colors = tweak_tab10(contrast=1.15, lighten=-0.2)
+
 
 fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -52,13 +77,13 @@ for i, (offset, vals) in enumerate(zip(offsets, vals_per_proc)):
     b = ax.bar(x + offset, vals, width=bar_width, color=colors[i % len(colors)], label=f"{proc_labels[i]} procs")
     bars.append(b)
 
-# annotate each bar with its value
-for b_group in bars:
-    for rect in b_group:
-        h = rect.get_height()
-        # place label slightly above for positive heights; adjust for symlog spacing
-        y = h * (1.05 if h > 0 else 0.95)
-        ax.text(rect.get_x() + rect.get_width() / 2, y, f"{h:.1f} MB", ha="center", va="bottom", fontsize=8, rotation=0)
+# # annotate each bar with its value
+# for b_group in bars:
+#     for rect in b_group:
+#         h = rect.get_height()
+#         # place label slightly above for positive heights; adjust for symlog spacing
+#         y = h * (1.05 if h > 0 else 0.95)
+#         ax.text(rect.get_x() + rect.get_width() / 2, y, f"{h:.1f} MB", ha="center", va="bottom", fontsize=8, rotation=0)
 
 ax.set_xticks(x)
 ax.set_xticklabels(matrix_labels)
@@ -67,7 +92,8 @@ ax.set_ylabel("Memory (MB, log scale)")
 # ax.set_title("Epoch time by hidden-layer size and process count")
 ax.set_title("Mean Per Process Memory Increase\nBatches Per Epoch: 60,  Batch Size: 1,000")
 
-ax.legend(title="Processes", bbox_to_anchor=(1.02, 1), loc="upper left")
+# ax.legend(title="Processes", bbox_to_anchor=(1.02, 1), loc="upper left")
+ax.legend(title="Processes", loc="upper left")
 ax.grid(True, which="both", axis="y", ls=":", lw=0.6)
 
 plt.tight_layout()

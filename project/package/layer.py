@@ -144,7 +144,7 @@ class Parallel_Layer:
 
     def _as_2d(self, p_X):
 
-        # Enforce (in, batch); transpose only if it exactly matches (batch, in)
+        # Transpose only if it matches (batch, in)
         if p_X.shape[0] != self.in_features:
             if p_X.ndim == 2 and p_X.shape[1] == self.in_features:
                 p_X = p_X.T
@@ -152,34 +152,11 @@ class Parallel_Layer:
                 raise ValueError(f"Expected input with {self.in_features} rows, got {p_X.shape}")
         return p_X
         
-        ######## Original version ##########
-        # X = np.asarray(X)
-        # # If X is a 1D array
-        # # if X.ndim == 1:
-        # #     X = X.reshape(-1, 1)             # (in, 1)
-        # # Enforce (in, batch); transpose only if it exactly matches (batch, in)
-        # if X.shape[0] != self.in_features:
-        #     if X.ndim == 2 and X.shape[1] == self.in_features:
-        #         X = X.T
-        #     else:
-        #         raise ValueError(f"Expected input with {self.in_features} rows, got {X.shape}")
-        # return X
-
     def _with_bias(self, p_X_no_bias):
         return p_X_no_bias.stack_ones_on_top()
 
-
-        ######## Original version ##########
-        # # Input's first row is the bias row (1s)
-        # ones = np.ones((1, X_no_bias.shape[1])) 
-        # return np.vstack([ones, X_no_bias])
-
        
-    def forward(self, X_no_bias):
-        ### Fourth pmat version ############################
-        p_X_no_bias = pmat.from_numpy(X_no_bias) if not isinstance(X_no_bias, pmat) else X_no_bias
-
-        
+    def forward(self, p_X_no_bias):
         ######
         # Since X_no_bias is the activation of a previous layer, which has no 
         # bias row, we need to add it here
@@ -187,186 +164,86 @@ class Parallel_Layer:
         self.p_X = self._with_bias(p_X_no_bias) # (in+1, batch)
 
         # (out, batch)
-        self.p_a = self.p_W @ self.p_X
-        self.p_h = self.phi(self.p_a)
+        self.p_A = self.p_W @ self.p_X
+        self.p_H = self.phi(self.p_A)
 
         assert self.p_W.shape[1] == self.p_X.shape[0], (self.p_W.shape, self.p_X.shape)
 
-        return self.p_h
-
-        ### Third pmat version ############################
-        # p_X_no_bias = pmat.from_numpy(X_no_bias) if not isinstance(X_no_bias, pmat) else X_no_bias
-
-        
-        # ######
-        # # Since X_no_bias is the activation of a previous layer, which has no 
-        # # bias row, we need to add it here
-        # p_X_no_bias = self._as_2d(p_X_no_bias)   # (in, batch)
-        # self.p_X = self._with_bias(p_X_no_bias) # (in+1, batch)
-
-        # # (out, batch)
-        # p_a = self.W @ self.p_X
-        # p_h = self.phi(p_a)
-
-        # assert self.W.shape[1] == self.p_X.shape[0], (self.W.shape, self.p_X.shape)
-
-        # self.a = p_a.get_full()  # (out, batch)
-        # self.h = p_h.get_full()  # (out, batch)
-
-        # return self.h
-
-        #### Second pmat version ############################
-        # ######
-        # # Since X_no_bias is the activation of a previous layer, which has no 
-        # # bias row, we need to add it here
-        # X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
-        # X_with_bias = self._with_bias(X_no_bias) # (in+1, batch)
-
-        # # (in+1, batch)
-        # p_X = pmat.from_numpy(X_with_bias)
-
-        # # (out, batch)
-        # p_a = self.W @ p_X
-        # p_h = self.phi(p_a)
-
-        # assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
-
-        # self.X = p_X.get_full()  # (in+1, batch)   
-        # self.a = p_a.get_full()  # (out, batch)
-        # self.h = p_h.get_full()  # (out, batch)
-
-        # return self.h
-
-        # #### First pmat version #########################################
-        #         # X_no_bias is activations from previous layer (no bias row)
-        # X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
-        # X_with_bias = self._with_bias(X_no_bias) # (in+1, batch)
-
-        # # (in+1, batch)
-        # p_X = pmat.from_numpy(X_with_bias)
-
-        # # (out, batch)
-        # p_a = self.W @ p_X
-        # p_h = self.phi(p_a)
-
-        # assert self.W.shape[1] == p_X.shape[0], (self.W.shape, p_X.shape)
-
-        # self.X = p_X.get_full()  # (in+1, batch)   
-        # self.a = p_a.get_full()  # (out, batch)
-        # self.h = p_h.get_full()  # (out, batch)
-
-        # return self.h
-
-        ##### Original version ##########################################
-        # X_no_bias is activations from previous layer (no bias row)
-        # X_no_bias = self._as_2d(X_no_bias)   # (in, batch)
-
-        # # Input's first row is the bias row
-        # self.X = self._with_bias(X_no_bias)  # (in+1, batch)    
-        # self.a = self.W @ self.X             # (out, batch)
-        # self.h = self.phi(self.a)
-        
-        # # Safety check:
-        # assert self.W.shape[1] == self.X.shape[0], (self.W.shape, self.X.shape)
-
-        # return self.h
+        return self.p_H
+    
+    def flops_forward(self, batch_size, activation=None):
+        """
+        - batch_size : B
+        - activation  : 'relu' | 'linear' | None (approximate)
+        """
+        F = self.in_features
+        # output rows = self.p_W.shape[0]
+        O = self.p_W.shape[0]
+        K = F + 1  # includes bias column
+        # exact matmul: O * B * (2*K - 1)
+        matmul = O * batch_size * (2 * K - 1)
+        act_cost = 0
+        if activation is None:
+            # try to guess from stored phi
+            name = getattr(self.phi, "__name__", "").lower()
+            activation = name if name else "linear"
+        if activation.startswith("relu"):
+            act_cost = O * batch_size    # ~1 compare/op per element
+        # small cost for stacking ones
+        bias_stack = batch_size
+        return matmul + act_cost + bias_stack
+    
+    #####################################################################################
 
     def backward(self, dL_dh_next):
-        ### Fourth pmat version ############################
-        p_dL_dh_next = dL_dh_next
-
-        p_dL_da = p_dL_dh_next * self.phi_prime(self.p_a)
-        assert p_dL_da.shape == self.p_a.shape, (p_dL_da.shape, self.p_a.shape)
-        p_dL_dW = p_dL_da @ self.p_X.T
-
-        p_W_no_bias = self.p_W.remove_first_column()
-
-        p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
-
-        self.dL_dW = p_dL_dW
-        return p_dL_dh_prev
-
-        ### Third pmat version ############################
-        # p_a = pmat.from_numpy(self.a)
-        # p_dL_dh_next = dL_dh_next
-
-        # p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
-        # assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
-        # p_dL_dW = p_dL_da @ self.p_X.T
-
-        # p_W_no_bias = self.W.remove_first_column()
-
-        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
-
-        # self.dL_dW = p_dL_dW
-        # return p_dL_dh_prev
-    
-        ##### Second pmat version ############################
-        # p_a = pmat.from_numpy(self.a)
-        # p_X = pmat.from_numpy(self.X)
-        # p_dL_dh_next = dL_dh_next
-
-        # p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
-        # assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
-        # p_dL_dW = p_dL_da @ p_X.T
-
-        # # p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
-
-        # p_W_no_bias = self.W.remove_first_column()
-
-        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
-
-        # self.dL_dW = p_dL_dW
-        # return p_dL_dh_prev
-
-        # ##### First pmat version #########################################
-        # p_a = pmat.from_numpy(self.a)
-        # p_X = pmat.from_numpy(self.X)
-        # p_dL_dh_next = pmat.from_numpy(dL_dh_next)
-
-        # p_dL_da = p_dL_dh_next * self.phi_prime(p_a)
-        # assert p_dL_da.shape == p_a.shape, (p_dL_da.shape, p_a.shape)
-        # p_dL_dW = p_dL_da @ p_X.T
-
-        # p_W_no_bias = pmat.resize(0, self.W.n, 1, self.W.m, self.W)
-
-        # p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
-
-        # self.dL_dW = p_dL_dW.get_full()
-        # return p_dL_dh_prev.get_full()
-
-
         """
-        Backprop through this layer.
-
-        Args:
             dL_dh_next: incoming gradient ∂L/∂h from the next layer (shape: out, batch).
                         For the final layer, this is ∂L/∂h of that layer.
 
         Returns:
             dL_dh_prev: gradient to pass to previous layer (shape: in_prev, batch).
         """
+        p_dL_dh_next = dL_dh_next
 
-        ##### Original version ##########################################
-        # # Local gradient wrt pre-activation a
-        # dL_da = dL_dh_next * self.phi_prime(self.a)          # (out, batch)
-        # assert dL_da.shape == self.a.shape, (dL_da.shape, self.a.shape)
+        p_dL_da = p_dL_dh_next * self.phi_prime(self.p_A)
+        assert p_dL_da.shape == self.p_A.shape, (p_dL_da.shape, self.p_A.shape)
+        self.p_dL_dW = p_dL_da @ self.p_X.T
 
-        # # Weight (incl. bias) gradient; X must have a leading column of 1s
-        # self.dL_dW = dL_da @ self.X.T                        # (out, in_prev+1)
+        p_W_no_bias = self.p_W.remove_first_column()
 
-        # # Pass gradient back (exclude bias weights)
-        # W_no_bias = self.W[:, 1:]                            # (out, in_prev)
-        # dL_dh_prev = W_no_bias.T @ dL_da                     # (in_prev, batch)
-        # return dL_dh_prev
+        p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
 
+        return p_dL_dh_prev
+
+    def flops_backward(self, batch_size, activation=None):
+        """
+        - batch_size : B
+        - activation : 'relu' | 'linear' | None (approximate; phi' cost ~1 op/element)
+        Returns integer FLOP count.
+        """
+        F = self.in_features             # input features (no bias)
+        O = self.p_W.shape[0]            # output features
+        K = F + 1                        # includes bias column
+        B = batch_size
+
+        # elementwise cost: phi' and multiply (~1 op per element)
+        elemwise = O * B
+
+        # gradient wrt weights: (out, batch) @ (batch, K) -> out * K * (2*B - 1)
+        dW_matmul = O * K * (2 * B - 1)
+
+        # gradient to previous layer: (in, out) @ (out, batch) -> in * B * (2*O - 1)
+        dprev_matmul = F * B * (2 * O - 1)
+
+        return elemwise + dW_matmul + dprev_matmul
+    
+    #####################################################################################
         
     def update_weights(self, alpha=1e-3):
-        p_dL_dW = self.dL_dW
-
+        
         """ Adam optimizer update """
         self.t += 1
-        p_g = p_dL_dW
+        p_g = self.p_dL_dW
         if self.weight_decay != 0:
             p_g = p_g + self.weight_decay * self.p_W
 
@@ -383,61 +260,41 @@ class Parallel_Layer:
 
         self.p_W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
 
-        self.dL_dW = None # Do not allow the same gradient to be used again
+        self.p_dL_dW = None # Do not allow the same gradient to be used again
 
-        ### First pmat version #########################################
-        # p_dL_dW = pmat.from_numpy(self.dL_dW)
-
-        # """ Adam optimizer update """
-        # self.t += 1
-        # p_g = p_dL_dW
-        # if self.weight_decay != 0:
-        #     p_g = p_g + self.weight_decay * self.W
-
-        # p_m = pmat.from_numpy(self.m)
-        # p_v = pmat.from_numpy(self.v)
-
-        # # first/second moments (momentum/velocity)
-        # p_m = self.b1 * p_m + (1 - self.b1) * p_g
-        # p_v = self.b2 * p_v + (1 - self.b2) * (p_g * p_g)
-
-        # # bias correction
-        # p_m_hat = p_m / (1 - self.b1 ** self.t)
-        # p_v_hat = p_v / (1 - self.b2 ** self.t)
-
-        # self.W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
-
-        # self.m = p_m.get_full()
-        # self.v = p_v.get_full()
-
-        # self.dL_dW = None # Do not allow the same gradient to be used again
-
-
-        # ### Original ##################################################
-        # """ Adam optimizer update """
-        # self.t += 1
-        # g = self.dL_dW
-        # if self.weight_decay != 0:
-        #     g = g + self.weight_decay * self.W
-
-        # # m = np.zeros_like(self.W)
-        # # v = np.zeros_like(self.W)
-
-        # m, v = self.m, self.v
-
-        #  # first/second moments (momentum/velocity)
-        # m = self.b1 * m + (1 - self.b1) * g
-        # v = self.b2 * v + (1 - self.b2) * (g * g)
-
-        # # bias correction
-        # m_hat = m / (1 - self.b1 ** self.t)
-        # v_hat = v / (1 - self.b2 ** self.t)
-
-        # self.W -= alpha * m_hat / (np.sqrt(v_hat) + self.epsilon)
-
-        # self.m, self.v = m, v
-        
         # """ SGD update (comment the above to use) """
-        # # self.W -= alpha * self.dL_dW
+        # self.p_W -= alpha * self.p_dL_dW
 
-        # self.dL_dW = None # Do not allow the same gradient to be used again
+        # self.p_dL_dW = None # Do not allow the same gradient to be used again
+
+    def flops_update(self, include_weight_decay=False):
+        """
+        Estimate FLOPs for the Adam update implemented in update_weights().
+        Counts per-weight-element operations (approximate):
+         - p_m update: 3 ops/element
+         - p_v update: 4 ops/element (includes p_g*p_g)
+         - bias-correct (two divisions): 2 ops/element
+         - final W update (sqrt, add eps, reciprocal, mult, mult, sub): ~6 ops/element
+        Total per element (no weight_decay) ≈ 15 ops.
+        If weight decay is enabled the gradient modification adds ~2 ops/element.
+        A small fixed scalar cost is added to account for b1**t and b2**t.
+        """
+        n, m = self.p_W.shape   # n = out, m = in + 1
+        elements = n * m
+
+        per_elem = 15
+        if include_weight_decay and self.weight_decay != 0:
+            per_elem += 2
+
+        # small scalar overhead for computing b1**t, b2**t and scalar subtractions/divisions
+        scalar_overhead = 4
+
+        return elements * per_elem + scalar_overhead
+
+    #####################################################################################
+
+    def flops_total(self, batch_size, activation=None, include_weight_decay=False):
+        """Return total FLOPs for forward + backward + update for a given batch_size."""
+        return (self.flops_forward(batch_size, activation=activation)
+                + self.flops_backward(batch_size, activation=activation)
+                + self.flops_update(include_weight_decay=include_weight_decay))
