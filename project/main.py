@@ -19,6 +19,9 @@ proc = psutil.Process(os.getpid())
 
 
 import sys
+
+# Set before running: export PYTHONUNBUFFERED=1
+# or ...
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True) # make print output unbuffered (flush by default)
 

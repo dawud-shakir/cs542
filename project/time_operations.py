@@ -1,4 +1,10 @@
-# test_pmat.py
+# time_operations.py
+# Set before running: export PYTHONUNBUFFERED=1
+
+import sys
+# enable line buffering for text stdout
+sys.stdout.reconfigure(line_buffering=True)
+
 
 import numpy as np
 
