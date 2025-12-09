@@ -273,16 +273,6 @@ class pmat:
                 
                 shared_array[B_row] = row
 
-                # if A.coords[1] == 0:
-                    
-                    # print("A_block=",A_block,"A_block_row=",A_block_row )
-                    # print(row[0])
-                    # B_numpy[B_row] = row[0] ### Won't work ... different B_numpy for each rank
-            
-            # if rank == 0:
-            #     print()
-            # grid.Barrier()
-
         # Synchronize writes across all ranks (this is done in from_shared_buffer as well, but just to be safe)
         win.Fence()
 
@@ -371,18 +361,20 @@ class pmat:
         split a global matrix into blocks and scatter those blocks from rank 0 to all ranks
         
         :param self: Description
-        :param M: Description
+        :param M: Rank with M = None just participates in the scatter 
         """
         blocks = []
-        for i in range(pmat.grid_comm.dims[0]):
-            for j in range(pmat.grid_comm.dims[1]):
-                row_start = i * self.n_loc
-                row_end = min((i + 1) * self.n_loc, self.n)
-                col_start = j * self.m_loc
-                col_end = min((j + 1) * self.m_loc, self.m)
-                
-                block = M[row_start:row_end, col_start:col_end]
-                blocks.append(block)
+
+        if M is not None:
+            for i in range(pmat.grid_comm.dims[0]):
+                for j in range(pmat.grid_comm.dims[1]):
+                    row_start = i * self.n_loc
+                    row_end = min((i + 1) * self.n_loc, self.n)
+                    col_start = j * self.m_loc
+                    col_end = min((j + 1) * self.m_loc, self.m)
+                    
+                    block = M[row_start:row_end, col_start:col_end]
+                    blocks.append(block)
 
         # Scatter blocks to all processes
         local_block = pmat.grid_comm.scatter(blocks, root=0)
@@ -390,7 +382,7 @@ class pmat:
         # Set local block
         self.local[:local_block.shape[0], :local_block.shape[1]] = local_block
 
-    def get_full(self, remove_padding=True):
+    def get_full(self, remove_padding=True, all_to_root=False) -> np.ndarray:
         # Gather all blocks at root
         Pr = pmat.grid_comm.dims[0]
         Pc = pmat.grid_comm.dims[1]
@@ -398,7 +390,11 @@ class pmat:
         M = np.zeros((self.n_loc * Pr, self.m_loc * Pc), dtype=self.dtype)
 
         # All processes gather a copy of all blocks
-        all_blocks = pmat.grid_comm.allgather(self.local)
+        all_blocks = None
+        if all_to_root:
+            all_blocks = pmat.grid_comm.gather(self.local, root=0)
+        else:
+            all_blocks = pmat.grid_comm.allgather(self.local)
 
         if all_blocks is not None:
       
@@ -416,18 +412,27 @@ class pmat:
                 M[row*self.n_loc:(row+1)*self.n_loc, col*self.m_loc:(col+1)*self.m_loc] = block #.reshape(self.n_loc, self.m_loc)
 
 
-
-        return M[:self.n, :self.m] if remove_padding else M
+        if all_to_root:
+            # Only root has the full matrix
+            if pmat.grid_comm.rank == 0:
+                return M[:self.n, :self.m] if remove_padding else M
+            else:
+                return None
+        else:
+            return M[:self.n, :self.m] if remove_padding else M
 
     @staticmethod
     def from_numpy(M_numpy: np.ndarray, dtype=np.float64) -> 'pmat':
         M_numpy = np.atleast_2d(M_numpy) if M_numpy is not None else None
 
-        n, m = M_numpy.shape       
+        # Make sure all processes know the shape and dtype, even if only rank 0 has the numpy array
+        shape = pmat.grid_comm.bcast(M_numpy.shape if M_numpy is not None else None, root=0)
+        n, m = shape[0], shape[1]
 
+        dtype=pmat.grid_comm.bcast(M_numpy.dtype if M_numpy is not None else None, root=0)
         if pmat.use_scatter:
             ### Set with scatter #############
-            M_pmat = pmat(n, m, dtype=M_numpy.dtype)
+            M_pmat = pmat(n, m, dtype=dtype)
             M_pmat.set_full(M_numpy)      #<---- use scatter
             return M_pmat
         
@@ -485,49 +490,8 @@ class pmat:
         win.free()
 
         return M_pmat
-
-    # @staticmethod
-    # def from_numpy(M_numpy: np.ndarray):
-    #     """
-    #     Convert a full numpy array to a distributed pmat
-    #     """
-    #     rank = pmat.grid_comm.Get_rank()
-    #     row, col = pmat.grid_comm.Get_coords(rank)
-        
-    #     n, m = M_numpy.shape
-
-    #     n_loc = np.ceil(n / pmat.grid_comm.dims[0]).astype(int)
-    #     m_loc = np.ceil(m / pmat.grid_comm.dims[1]).astype(int)
-       
-    #     row_start = row * n_loc
-    #     row_end = min((row + 1) * n_loc, n)
-    #     col_start = col * m_loc
-    #     col_end = min((col + 1) * m_loc, m)
-
-    #     block = M_numpy[row_start:row_end, col_start:col_end]
-        
-    #     # Pad with zeros
-    #     local = np.zeros((n_loc, m_loc), dtype=np.double)
-    #     # Copy from numpy block up to padding        
-    #     local[:block.shape[0], :block.shape[1]] = block
-
-    #     return pmat(n, m, local)
     
-    @staticmethod
-    def resize(top: int, bottom: int, left: int, right: int, M: 'pmat'):
-        # grid_comm = create_grid_comm()
-        # new_M = pmat(bottom-top, right-left, grid_comm)   # start with all zeros
-
-        full = M.get_full()[top:bottom, left:right]
-        new_M = pmat.from_numpy(full)
-
-        return new_M
-
     def pretty_string(self, name="", remove_padding=True, as_type=None):
-        # print("p_rows, p_cols:", p_rows, p_cols)
-        # print("n, m:", n, m)
-        # print("n_local, n_rem:", n_local, n_rem)
-        # print("m_local, m_rem:", m_local, m_rem)
 
         if name != "":
             if self.grid_comm.rank == 0:
@@ -762,10 +726,6 @@ class pmat:
         global_values = self.grid_comm.allgather(local_values)
         # Filter out empty blocks
         non_empty_lists = [lst for lst in global_values if len(lst)!= 0] 
-        # if self.rank==0:
-        #     print("local_values:", local_values)
-        #     print("local_values shapes:", [np.array(lv).shape for lv in global_values])
-        # exit()
 
         global_values = np.concatenate([np.array(lst, dtype=self.dtype) for lst in non_empty_lists])
         return global_values
@@ -786,62 +746,25 @@ class pmat:
 
         return
 
-
-    # def __getitem__(self, idx):
-    #     #### Keep as get_full for now ... optimize later ####
-    #     numpy_result = self.get_full()[idx]
-    #     return numpy_result
-        
-    #     # idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
-    #     # idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
-    #     # assert(len(idx0) == len(idx1))
-
-    #     # local_values = []
-    #     # for (global_i, global_j) in zip(idx0, idx1):
-    #     #         rank_i, block_i = divmod(global_i, self.n_loc)
-    #     #         rank_j, block_j = divmod(global_j, self.m_loc)
-                
-    #     #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
-    #     #             local_values.append(self.local[block_i, block_j])
-
-    #     # local_values = np.array(local_values, dtype=self.local.dtype)
-
-    #     # padded = np.full(len(idx0), np.nan, dtype=self.local.dtype)
-    #     # padded[:len(local_values)] = local_values
-
-    #     # global_values = np.array((1, len(idx0)), dtype=self.local.dtype)
-    #     # self.grid_comm.Allgather(padded, global_values)
-
-    #     # if not np.allclose(np.array(local_values), numpy_result):
-    #     #     raise ValueError(f"pmat __getitem__ mismatch with numpy result\n")
-
-    #     return local_values
-
-    # def __setitem__(self, idx, value):
-    #     before_loop = self.get_full()
-    #     before_loop[idx] = value
-
-    #     idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
-    #     idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
-
-    #     for (global_i, global_j) in zip(idx0, idx1):
-
-    #         rank_i, block_i = divmod(global_i, self.n_loc)
-    #         rank_j, block_j = divmod(global_j, self.m_loc)
-                
-    #         if (self.coords[0] == rank_i) and (self.coords[1] == rank_j):
-    #             self.local[block_i, block_j] = value
-
-    #     if not np.allclose(self.get_full(), before_loop):
-    #         raise ValueError(f"pmat __setitem__ failed to set value correctly:\n")
-        
-    # ############################################################################
-
     def remove_first_column(self):
+        assert self.m > 1, "matrix only has one column"
     
+        if pmat.use_scatter:
+            all_blocks = self.get_full(all_to_root=True)
+            
+
+            # Remove first column
+            
+            all_blocks_no_bias = all_blocks[:, 1:] if all_blocks is not None else None # 
+            
+            no_bias = pmat.from_numpy(all_blocks_no_bias)   
+
+            return no_bias
+        
+        ### Shared memory approach to remove first column #########
+
         col_offset = 1  # remove first column
 
-        assert self.m > 1, "matrix only has one column"
                 
         n, m = self.shape        
         

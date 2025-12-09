@@ -123,6 +123,7 @@ p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
 # Hyperparameters and Network 
 ################################################################################
 
+pmat.use_scatter = True  # set to True to use scatter/gather instead of shared memory, which does not support multiple nodes
 
 alpha = 1e-3
 n_epochs = 5
@@ -236,7 +237,7 @@ def main():
     start_train_time = MPI.Wtime()
 
     for epoch in range(n_epochs):
-        
+     
         # Check early stopping conditions 
         if stop_early:
             break
@@ -263,14 +264,61 @@ def main():
 
         # Training loop over batches
         for (batch_num, batch_idx) in enumerate(batches_idx):
+            start_batch_time = MPI.Wtime()
+
             if stop_early:
                 break
+
+
 
             ############ Start of batch ############
 
             # Get batch data
             p_X = p_X_train[batch_idx]  # (batch_size, 784)
             p_Y = p_y_train[batch_idx]  # (batch_size,)
+
+
+
+            # all_blocks = p_X.get_full(all_to_root=True)
+            
+            # if MPI.COMM_WORLD.rank == 0:
+            #     print("Full batch data shape at root:", all_blocks.shape)
+            # else:
+            #     print("all_blocks is None=", all_blocks is None, " at rank", MPI.COMM_WORLD.rank)
+
+            # # Remove first column
+            
+            # all_blocks_with_bias = np.hstack([np.ones((all_blocks.shape[0], 1)), all_blocks]) if all_blocks is not None else None # 
+            # with_bias = pmat.from_numpy(all_blocks_with_bias)   
+
+
+            # if with_bias is not None:
+            #     print("With bias shape at rank", MPI.COMM_WORLD.rank, ":", with_bias.shape)
+            # else:
+            #     print("with_bias is None=", with_bias is None, " at rank", MPI.COMM_WORLD.rank)
+
+
+            # all_blocks = p_X.get_full(all_to_root=True)
+            
+            # if MPI.COMM_WORLD.rank == 0:
+            #     print("Full batch data shape at root:", all_blocks.shape)
+            # else:
+            #     print("all_blocks is None=", all_blocks is None, " at rank", MPI.COMM_WORLD.rank)
+
+            # # Remove first column
+            
+            # all_blocks_no_bias = all_blocks[:, 1:] if all_blocks is not None else None # 
+            
+            # no_bias = pmat.from_numpy(all_blocks_no_bias)   
+
+
+            # if no_bias is not None:
+            #     print("With bias shape at rank", MPI.COMM_WORLD.rank, ":", no_bias.shape)
+            # else:
+            #     print("with_bias is None=", no_bias is None, " at rank", MPI.COMM_WORLD.rank)
+
+            
+            # exit()
 
             ############ Forward pass ############
             h1 = fc1.forward(p_X)                       # (hidden_size, batch_size)
@@ -313,26 +361,27 @@ def main():
             ############ End of batch ############
 
             batch_count += 1
+            training_losses.append(loss)
+            train_accuracies.append(training_accuracy)
+            
+            MPI.COMM_WORLD.Barrier()  # Synchronize before time and checking stopping conditions
+
+            elapsed_batch_time = MPI.Wtime() - start_batch_time
+            elapsed_batch_time = MPI.COMM_WORLD.reduce(elapsed_batch_time, op=MPI.MAX, root=0)
+      
+            mem_bytes, mem_label = get_memory_usage()
+            mem_bytes -= start_mem_bytes  # Report memory used during training
+            mem_bytes = MPI.COMM_WORLD.reduce(mem_bytes, op=MPI.MAX, root=0)
 
             elapsed_train_time = MPI.Wtime() - start_train_time
-
-            MPI.COMM_WORLD.Barrier()  # Synchronize before checking stopping conditions
-
             
 
-            # Test accuracy on test batch every ''measure_test_accuracy_every' batches (not included in training time or memory usage)
+            # Test accuracy on test batch every ''measure_test_accuracy_every' batches (not included in time or memory usage)
             if (batch_num + 1) % measure_test_accuracy_every == 0:
                 test_accuracies.append(evaluate())
                 if MPI.COMM_WORLD.Get_rank() == 0:
                     print(f"#### Epoch {epoch+1} test accuracy: {test_accuracies[-1]:.4f} ####")
 
-
-            # Metrics
-            training_losses.append(loss)
-            train_accuracies.append(training_accuracy)
-            mem_bytes, mem_label = get_memory_usage()
-            mem_bytes -= start_mem_bytes  # Report memory used during training
-            
 
             if MPI.COMM_WORLD.Get_rank() == 0:
                 print(  
@@ -340,8 +389,9 @@ def main():
                     f"Batch {n_batches*epoch+batch_num+1}, "
                     f"Loss: {loss:.4f}, Training Accuracy: {training_accuracy:.4f}, "
                     f"Process: {MPI.COMM_WORLD.Get_rank()} of {MPI.COMM_WORLD.Get_size()}, "
-                    f"Per Process Memory ({mem_label}): {mem_bytes / 1024**2:.2f} MB, "
-                    f"Train Time: {elapsed_train_time:.2f} sec"
+                    f"Max Process Memory ({mem_label}): {mem_bytes / 1024**2:.2f} MB, "
+                    f"Batch Time: {elapsed_batch_time:.2f} sec, "
+                    f"Total Time: {elapsed_train_time:.2f} sec"
                     )
 
         
