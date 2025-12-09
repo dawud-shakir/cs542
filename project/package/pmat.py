@@ -50,13 +50,79 @@ def normalize_index(idx):
         raise TypeError(f"Unsupported index type: {type(idx)}")
 
 
+
+def soon_to_be____from_numpy(M: np.ndarray):
+    grid = create_grid_comm()
+    
+    M_shape = np.asarray(M.shape) if grid.rank == 0 else np.empty(2, dtype=np.int64)
+    M_shape = grid.bcast(M_shape, root=0)
+
+    dtype_obj = M.dtype if grid.rank == 0 else None
+    dtype = grid.bcast(dtype_obj, root=0)
+
+
+    # Create the parallel matrix    
+    parallel_matrix = pmat(M_shape[0], M_shape[1], dtype=dtype)
+    
+
+    blocks = []
+    offsets = parallel_matrix.offsets
+    extents = parallel_matrix.extents
+    
+    
+    # Only rank 0 stores the blocks to be scattered
+    if grid.rank == 0:
+        for i in range(grid.dims[0]):
+            for j in range(grid.dims[1]):
+                            
+                    # Compute the block indices within the full numpy matrix
+                    # row_start = i * parallel_matrix.n_loc
+                    # row_end = min((i + 1) * parallel_matrix.n_loc, parallel_matrix.n)
+                    # col_start = j * parallel_matrix.m_loc
+                    # col_end = min((j + 1) * parallel_matrix.m_loc, parallel_matrix.m)
+                
+                    row_start, col_start = offsets[i][j]
+                    
+                    row_end = row_start + extents[i][j][0]
+                    col_end = col_start + extents[i][j][1] 
+
+                    # This block has no data to send if extents are (0, 0)  and row_start == row_end, col_start == col_end                    
+                    block = M[row_start:row_end, col_start:col_end]
+
+                    # Append the block for scattering
+                    blocks.append(block)
+
+    # Scatter blocks to all processes
+    local_block = grid.scatter(blocks, root=0)
+    
+    
+    # Get this rank's extent to set local block
+    coords = parallel_matrix.coords
+    rank_extent = extents[coords[0]][coords[1]]
+
+    # Set local block, ignoring padding if any
+    parallel_matrix.local[:rank_extent[0], :rank_extent[1]] = local_block
+
+
+
+    return parallel_matrix
+
 ################################################################################
 # Class pmat (will probably be called p_matrix later)
 ################################################################################
 
 class pmat:
+
     ############################################################################
-    # File I/O
+    # Static members and methods
+    ############################################################################
+
+    # Static grid communicator shared by all pmats
+    grid_comm = create_grid_comm()
+    use_scatter = True
+
+    ############################################################################
+    #                           File I/O
     ############################################################################
     def to_file(self, filename: str, prefix_current_directory=True) -> int:
         comm = MPI.COMM_WORLD
@@ -220,8 +286,12 @@ class pmat:
         # Synchronize writes across all ranks (this is done in from_shared_buffer as well, but just to be safe)
         win.Fence()
 
-        # Convert shared array to a pmat 
-        B = pmat.from_shared_buffer(win, shared_array, dtype=A.dtype)
+        if pmat.use_scatter:
+            # Scatter the shared array to all processes
+            B = pmat.from_numpy(shared_array, dtype=A.dtype)
+        else:
+            # Convert shared array to a pmat 
+            B = pmat.from_shared_buffer(win, shared_array, dtype=A.dtype)
 
         # Clean up
         win.Free()
@@ -277,12 +347,7 @@ class pmat:
         return (pmat_matrix, file_size)
 
 
-    ############################################################################
-    # Static members and methods
-    ############################################################################
 
-    # Static grid communicator shared by all pmats
-    grid_comm = create_grid_comm()
 
     def get_local(self):
         n_loc, m_loc = self.extents[self.coords[0]][self.coords[1]]
@@ -295,8 +360,13 @@ class pmat:
         
         if local is not None:
             self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
+ 
 
     def set_full(self, M):
+        
+        
+
+
         """
         split a global matrix into blocks and scatter those blocks from rank 0 to all ranks
         
@@ -355,10 +425,14 @@ class pmat:
 
         n, m = M_numpy.shape       
 
-        # M_pmat = pmat(n, m, dtype=M_numpy.dtype)
-        # M_pmat.set_full(M_numpy)      #<---- use scatter after this instead
-        # return M_pmat
-    
+        if pmat.use_scatter:
+            ### Set with scatter #############
+            M_pmat = pmat(n, m, dtype=M_numpy.dtype)
+            M_pmat.set_full(M_numpy)      #<---- use scatter
+            return M_pmat
+        
+        ### Set with shared memory #############
+
         coords = pmat.grid_comm.coords
 
         ########################################################################
@@ -1002,6 +1076,20 @@ class pmat:
 
     def __neg__(self):
         return pmat(self.n, self.m, -self.local)
+
+    def __pow__(self, exponent):
+        new_local = self.local ** exponent
+        return pmat(self.n, self.m, new_local)
+
+    # def __rpow__(self, base):
+    #     # handles base ** pmat -> elementwise
+    #     new_local = base ** self.local
+    #     return pmat(self.n, self.m, new_local)
+
+    # def __ipow__(self, exponent):
+    #     # in-place power
+    #     self.local **= exponent
+    #     return self
 
     def __matmul__(self, other: 'pmat'):
         

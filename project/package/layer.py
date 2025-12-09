@@ -195,7 +195,7 @@ class Parallel_Layer:
     
     #####################################################################################
 
-    def backward(self, dL_dh_next):
+    def backward(self, p_dL_dH_next):
         """
             dL_dh_next: incoming gradient ∂L/∂h from the next layer (shape: out, batch).
                         For the final layer, this is ∂L/∂h of that layer.
@@ -203,17 +203,16 @@ class Parallel_Layer:
         Returns:
             dL_dh_prev: gradient to pass to previous layer (shape: in_prev, batch).
         """
-        p_dL_dh_next = dL_dh_next
-
-        p_dL_da = p_dL_dh_next * self.phi_prime(self.p_A)
-        assert p_dL_da.shape == self.p_A.shape, (p_dL_da.shape, self.p_A.shape)
-        self.p_dL_dW = p_dL_da @ self.p_X.T
+    
+        p_dL_dA = p_dL_dH_next * self.phi_prime(self.p_A)
+        assert p_dL_dA.shape == self.p_A.shape, (p_dL_dA.shape, self.p_A.shape)
+        self.p_dL_dW = p_dL_dA @ self.p_X.T
 
         p_W_no_bias = self.p_W.remove_first_column()
 
-        p_dL_dh_prev = p_W_no_bias.T @ p_dL_da  # (in_prev, batch)
+        p_dL_dH_prev = p_W_no_bias.T @ p_dL_dA  # (in_prev, batch)
 
-        return p_dL_dh_prev
+        return p_dL_dH_prev
 
     def flops_backward(self, batch_size, activation=None):
         """
@@ -240,10 +239,14 @@ class Parallel_Layer:
     #####################################################################################
         
     def update_weights(self, alpha=1e-3):
-        
+        if self.p_dL_dW is None:
+            raise ValueError("No gradient stored. Cannot update weights.")
+
+
         """ Adam optimizer update """
         self.t += 1
         p_g = self.p_dL_dW
+
         if self.weight_decay != 0:
             p_g = p_g + self.weight_decay * self.p_W
 
@@ -262,7 +265,7 @@ class Parallel_Layer:
 
         self.p_dL_dW = None # Do not allow the same gradient to be used again
 
-        # """ SGD update (comment the above to use) """
+        # """ SGD update -- very slow (uncomment below and comment above to use) """
         # self.p_W -= alpha * self.p_dL_dW
 
         # self.p_dL_dW = None # Do not allow the same gradient to be used again
