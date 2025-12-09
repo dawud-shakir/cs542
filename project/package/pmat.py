@@ -1357,7 +1357,7 @@ class pmat:
             else:
                 for row in range(num_rows): 
                     
-                    local_max = dtype(np.max(local[row, :]))
+                    local_max = np.max(local[row, :]).astype(dtype)
                     local_idx = np.int64(np.argmax(local[row, :]))
                     global_idx = np.int64(local_idx + position[1])
 
@@ -1421,7 +1421,19 @@ class pmat:
     
 
     def stack_ones_on_top(self: 'pmat') -> 'pmat':
+    
+        if pmat.use_scatter:
+            all_blocks = self.get_full(all_to_root=True)
+            
 
+            # Add a row of ones on top
+            all_blocks_with_bias = np.vstack([np.ones((1, self.m), dtype=self.dtype), all_blocks]) if all_blocks is not None else None
+            
+            with_bias  = pmat.from_numpy(all_blocks_with_bias)   
+
+            return with_bias
+        
+        ### Shared memory approach to stacking a row of ones #########
         # row_offset = 1  # add to first row
         coords = pmat.grid_comm.coords
         n, m = self.shape        

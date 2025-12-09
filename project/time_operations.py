@@ -35,7 +35,7 @@ batch_size = 1000
 alpha = 1e-3
 
 
-
+pmat.use_scatter = True
 
 
 if __name__ == "__main__":
@@ -104,9 +104,9 @@ if __name__ == "__main__":
                 "nll_loss":                 lambda: nn.nll_loss(A_pmat, items[1]),  
                 "nll_loss_derivative":      lambda: nn.nll_loss_derivative(A_pmat, items[1]),
 
-                f"layer forward(ReLU, {hidden_size,batch_size})":           lambda: fc2.forward(X_pmat),
-                f"layer backward(ReLU-deriv, {hidden_size,batch_size})":    lambda: fc2.backward(X_pmat),
-                f"layer update(Adam optimization)":                         lambda: (fc2.backward(X_pmat), fc2.update_weights(alpha=0.001)),
+                # f"layer forward(ReLU, {hidden_size,batch_size})":           lambda: fc2.forward(X_pmat),
+                # f"layer backward(ReLU-deriv, {hidden_size,batch_size})":    lambda: fc2.backward(X_pmat),
+                # f"layer update(Adam optimization)":                         lambda: (fc2.backward(X_pmat), fc2.update_weights(alpha=0.001)),
             
             }
 

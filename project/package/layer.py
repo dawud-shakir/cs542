@@ -21,6 +21,9 @@ def linear_derivative(z): return np.ones_like(z)    # (features, batch)
 #     # d/dy_hat of MSE with mean over all elements
 #     return (2.0 / y.size) * (y_hat - y)
 
+# Stack_ones_on_top requires (non-shared buffer version): gather and scatter
+
+# Log_softmax Requires: transpose, subtraction, exp, row max, row sum, log
 def log_softmax(z):
     """
     log(softmax(z)) = log(exp(z)/sum(exp(z))) = z - log(sum(exp(z)))
@@ -31,9 +34,9 @@ def log_softmax(z):
 
     return log_z
 
+# Negative log likelihood loss
 def nll_loss(log_probs, true_labels):
-    """
-    Computes Negative Log Likelihood (NLL) loss.
+    """.
     log_probs: (batch_size, num_classes)
     true_labels: (batch_size,)
     Returns: scalar loss value
