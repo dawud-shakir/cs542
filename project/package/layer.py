@@ -1,183 +1,151 @@
 """
 layer.py
 """
-from mpi4py import MPI
-from package.pmat import pmat, create_grid_comm
-
-
 import numpy as np
 
-# Activations
-def ReLU(z): return np.maximum(0.0, z)        # (out, batch)               
-def ReLU_derivative(z): return (z > 0).astype(float)    # (out, batch)
-def linear(z): return z                             # (features, batch)
-def linear_derivative(z): return np.ones_like(z)    # (features, batch)
+from package.pmat import pmat
 
-# Not used directly right now
-# def mean_squared_error(y, y_hat):
-#     return np.mean((y_hat - y) ** 2)
+### Activations ##############################################################
+def ReLU(z): 
+    return np.maximum(0.0, z)           # (out_size, batch_size)               
 
-# def mean_squared_error_derivative(y, y_hat):
-#     # d/dy_hat of MSE with mean over all elements
-#     return (2.0 / y.size) * (y_hat - y)
+def ReLU_derivative(z):
+    return (z > 0).astype(float)        # (out_size, batch_size)
 
-# Stack_ones_on_top requires (non-shared buffer version): gather and scatter
+def linear(z): 
+    return z                            # (in_size, batch_size)
 
-# Log_softmax Requires: transpose, subtraction, exp, row max, row sum, log
+def linear_derivative(z):
+    return np.ones_like(z)              # (in_size, batch_size)
+
+# Activation for output layer
 def log_softmax(z):
-    """
-    log(softmax(z)) = log(exp(z)/sum(exp(z))) = z - log(sum(exp(z)))
-    """
-    max_z = np.max(z, axis=1, keepdims=True)  # For numerical stability
+    # For numerical stability 
+    max_z = np.max(z, axis=1, keepdims=True)  
+    
     exp_z = np.exp(z - max_z)
     log_z = z - np.log(np.sum(exp_z, axis=1, keepdims=True)) - max_z
 
-    return log_z
+    return log_z                        # (num_classes, batch_size)
 
-# Negative log likelihood loss
+### Loss ##############################################################
 def nll_loss(log_probs, true_labels):
     """.
     log_probs: (batch_size, num_classes)
     true_labels: (batch_size,)
     Returns: scalar loss value
     """
-    # Extract log probabilities of true classes
-    batch_size = log_probs.shape[0]
-    nll_loss_value = -np.mean(log_probs[np.arange(batch_size), true_labels])
     
-    return nll_loss_value
-
+    # Extract log probabilities of the true classes
+    batch_size = log_probs.shape[0]     # (batch_size, num_classes) 
+    nll_loss_value = -np.mean(log_probs[np.arange(batch_size), true_labels])    
+    
+    return nll_loss_value # scalar
+ 
 def nll_loss_derivative(log_probs, true_labels):
     """Derivative of NLL loss w.r.t. log_softmax output"""
-    probs = np.exp(log_probs)
-    batch_size, num_classes = probs.shape
     
-    # Create one-hot encoding
+    # Convert log probabilities to probabilities
+    probs = np.exp(log_probs)
+    batch_size, _ = probs.shape         # (batch_size, num_classes)  
+    
+    # One-hot encode true labels (1=correct class, 0=all others)
     one_hot = np.zeros_like(probs)
-    one_hot[np.arange(batch_size), true_labels] = 1
+    one_hot[np.arange(batch_size), true_labels] = 1  # (batch_size, num_classes)
     
     # Combined gradient
-    return probs - one_hot  # (batch_size, num_classes)
+    return probs - one_hot              # (batch_size, num_classes)
 
 class Parallel_Layer:
     def __init__(self, input_size, output_size):
-        
-
-
-        ############################################################
-        # Initialize weights and biases
-        ############################################################
-
-        # Weights: Uniform initialization (Xavier)
+        # Uniform initialization (Xavier)
         weight_bound = np.sqrt(6.0 / (input_size + output_size))
-        
-        # Bias column: Uniform(-1/sqrt(fan_in), +1/sqrt(fan_in))
-        bias_bound = 1.0 / np.sqrt(input_size)
-
         W = np.random.uniform(-weight_bound, weight_bound, size=(output_size, input_size))
+        
+        # Bias column
+        bias_bound = 1.0 / np.sqrt(input_size)
         bias = np.random.uniform(-bias_bound, bias_bound, size=(output_size, 1))
 
-        W = np.hstack([bias, W]) # (out, in+1)
+        # Add bias column to weights
+        W = np.hstack([bias, W])            # (out_size, in_size + 1)
 
         self.p_W = pmat.from_numpy(W)
 
-        ############################################################
-        # Initialize local blocks directly
-        ############################################################
 
-        # self.p_W = pmat(n=output_size, m=input_size+1) # +1 for bias 
-
-        # if self.p_W.coords[1] == 0:
-        #     # Only blocks with the first column have a bias column
-        #     weight_local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc-1))
-            
-        #     bias_local = np.random.uniform(-bias_bound, bias_bound, size=(self.p_W.n_loc, 1))
-
-        #     local = np.hstack([bias_local, weight_local])
-
-        # else:
-        #     # Every other block has no bias column
-        #     local = np.random.uniform(-weight_bound, weight_bound, size=(self.p_W.n_loc, self.p_W.m_loc))
-
-
-        # self.p_W._set_local(local) # (out, in+1)
-
-        ############################################################
-
+        # Store input size (without bias) so _as_2d can check whether transpose is needed
         self.in_features = input_size
 
-        # Default is linear activation
+        # Default activation is linear
         self.phi = linear
         self.phi_prime = linear_derivative
 
-        
+        # Weights and biases gradient
         self.p_dL_dW = None # indicate no gradient stored yet
 
-        # Update-related variables
-
-        betas = (0.9, 0.999)
-        eps = 1e-8
-        weight_decay = 0.0
-
-        self.b1, self.b2 = betas
-        self.epsilon = eps
-        self.weight_decay = weight_decay
-
-        # First and second mements
-        self.m = pmat(self.p_W.shape[0], self.p_W.shape[1])
-        self.v = pmat(self.p_W.shape[0], self.p_W.shape[1])
+        # Update variables (Adam optimizer)
+        self.b1, self.b2 = (0.9, 0.999)
+        self.epsilon = 1e-8
+        self.weight_decay =  0.0
+        
+        self.m = pmat(self.p_W.shape[0], self.p_W.shape[1]) # first moment
+        self.v = pmat(self.p_W.shape[0], self.p_W.shape[1]) # second moment
         self.t = 0  # time step
-        ############################################################
-       
 
+    # Ensures that input is always (in_size, batch_size)
     def _as_2d(self, p_X):
-
-        # Transpose only if it matches (batch, in)
+        # Transpose only if not already transposed
         if p_X.shape[0] != self.in_features:
             if p_X.ndim == 2 and p_X.shape[1] == self.in_features:
                 p_X = p_X.T
             else:
                 raise ValueError(f"Expected input with {self.in_features} rows, got {p_X.shape}")
         return p_X
-        
+
+    # Add bias row to input    
     def _with_bias(self, p_X_no_bias):
         return p_X_no_bias.stack_ones_on_top()
 
-       
-    def forward(self, p_X_no_bias):
-        ######
-        # Since X_no_bias is the activation of a previous layer, which has no 
-        # bias row, we need to add it here
-        p_X_no_bias = self._as_2d(p_X_no_bias)      # (in, batch)
-        self.p_X = self._with_bias(p_X_no_bias)     # (in+1, batch)
+    ############################################################################
 
+    def forward(self, p_X_no_bias):
+        # We need to add the bias here since X_no_bias is the activation of the previous layer, which has no bias row
+        p_X_no_bias = self._as_2d(p_X_no_bias)      # (in_size, batch_size)
+        self.p_X = self._with_bias(p_X_no_bias)     # (in_size + 1, batch_size)
         
-        self.p_A = self.p_W @ self.p_X      # (out, batch)
-        self.p_H = self.phi(self.p_A)       # (out, batch)
+        # Compute A = W * X
+        self.p_A = self.p_W @ self.p_X              # (out_size, batch_size)
+        
+        # Apply activation function
+        self.p_H = self.phi(self.p_A)               # (out_size, batch_size)
 
         assert self.p_W.shape[1] == self.p_X.shape[0], (self.p_W.shape, self.p_X.shape)
 
+        # Pass activation to next layer
         return self.p_H
     
     ############################################################################
 
     def backward(self, p_dL_dH_next):
         """
-            dL_dh_next (out_size, batch_size): incoming gradient ∂L/∂h from the next layer. For the final layer, this is ∂L/∂h of that layer.
-
-        Returns:
-            dL_dh_prev (in_prev_size, batch_size): gradient to pass to previous layer.
+            dL_dh_next (out_size, batch_size) is the gradient, ∂L/∂H, from the next layer. Objviously, there is no next layer after the final layer, so this is ∂L/∂H of that layer.
         """
-    
+      
+        # Compute ∂L/∂A = ∂L/∂H * φ'(A)
         p_dL_dA = p_dL_dH_next * self.phi_prime(self.p_A)
+
         assert p_dL_dA.shape == self.p_A.shape, (p_dL_dA.shape, self.p_A.shape)
+        
+        # Compute ∂L/∂W = ∂L/∂A * X^T
         self.p_dL_dW = p_dL_dA @ self.p_X.T
 
+        # Exclude bias from W
         p_W_no_bias = self.p_W.remove_first_column()
 
-        p_dL_dH_prev = p_W_no_bias.T @ p_dL_dA  # (in_prev, batch)
+        # Compute ∂L/∂H_prev = W^T * ∂L/∂A
+        p_dL_dH_prev = p_W_no_bias.T @ p_dL_dA      # (in_prev_size, batch_size)
 
-        return p_dL_dH_prev
+        # Pass gradient to previous layer
+        return p_dL_dH_prev 
     
     ############################################################################
         
@@ -185,34 +153,26 @@ class Parallel_Layer:
         if self.p_dL_dW is None:
             raise ValueError("No gradient stored. Cannot update weights.")
 
+        self.t += 1             # increment time
+        p_g = self.p_dL_dW      # intermediate variable for gradient
 
-        """ Adam optimizer update """
-        self.t += 1
-        p_g = self.p_dL_dW
-
+        # Weight decay
         if self.weight_decay != 0:
             p_g = p_g + self.weight_decay * self.p_W
 
-        p_m = self.m
+        # Copy in case MPI-communicator is freed during update
+        p_m = self.m 
         p_v = self.v
 
-        # first/second moments (momentum/velocity)
+        # First and second moment estimates
         p_m = self.b1 * p_m + (1 - self.b1) * p_g
         p_v = self.b2 * p_v + (1 - self.b2) * (p_g * p_g)
 
-        # bias correction
+        # Bias correction
         p_m_hat = p_m / (1 - self.b1 ** self.t)
         p_v_hat = p_v / (1 - self.b2 ** self.t)
 
+        # Update weights
         self.p_W -= alpha * p_m_hat * (1 / (np.sqrt(p_v_hat) + self.epsilon))
 
-        self.p_dL_dW = None # Do not allow the same gradient to be used again
-
-        """ 
-            SGD update -- very slow (uncomment below and comment above to use
-        """
-        # self.p_W -= alpha * self.p_dL_dW
-        # self.p_dL_dW = None # Do not allow the same gradient to be used again
-
-
-    ############################################################################
+        self.p_dL_dW = None    # do not allow the same gradient to be used again
