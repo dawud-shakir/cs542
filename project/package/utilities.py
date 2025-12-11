@@ -73,13 +73,73 @@ def print_pmat_on_rank0(M: 'pmat', msg=""):
         # msg = msg + ":" if len(msg) > 0 else msg
         print(f"{msg}\n{s}\n")
 
-# ANSI color helpers
-def set_text_color(code):
-    # code is an integer (e.g. 31 for red, 0 to reset)
-    print(f"\033[{code}m", end="", flush=True)
+def pretty_string(distributed_matrix, name="", remove_padding=True, as_type=None):
 
-def reset_text_color():
-    print("\033[0m", end="", flush=True)
+    if name != "":
+        if distributed_matrix.grid_comm.rank == 0:
+            print(f"{name}:")
+
+    if as_type is None:
+        if distributed_matrix.local.dtype == np.int32 or distributed_matrix.local.dtype == np.int64:
+            as_type = "i"
+        elif distributed_matrix.local.dtype == np.float32:
+            as_type = "f"
+        elif distributed_matrix.local.dtype == np.float64:
+            as_type = "d"
+        elif distributed_matrix.local.dtype == np.bool_:
+            as_type = "b"
+        else:
+            raise ValueError(f"Unsupported dtype for pretty print: {distributed_matrix.local.dtype}")
+
+    full_matrix = distributed_matrix.to_numpy(remove_padding)
+    matrix_str = ""            
+    
+    for row in range(distributed_matrix.n if remove_padding else distributed_matrix.n + distributed_matrix.n_pad):
+        col = 0
+
+        if row % distributed_matrix.n_loc == 0:
+            row_color = (row * distributed_matrix.m) // distributed_matrix.n_loc
+        while col < distributed_matrix.m:
+            color_code = 31 + ((row_color + col))   # 7 possible colors
+            # print(f"row {row} col {j} color {color_code}", flush=True)
+            
+            if as_type == "i":
+                block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + distributed_matrix.m_loc])
+            elif as_type == "f" or as_type == "d":
+                block_str = "\b" + "".join(f"{float(val):10.1f}" for val in full_matrix[row][col : col + distributed_matrix.m_loc])
+            elif as_type == "b":
+                block_str = "\b" + "".join(f"{val}" for val in full_matrix[row][col : col + distributed_matrix.m_loc])                
+
+            if distributed_matrix.grid_comm.rank == 0:
+                Pr = row // distributed_matrix.n_loc
+                Pc = col // distributed_matrix.m_loc
+                # color_code = 31 + (Pr + Pc) % 7  # 7 possible colors
+                # set_text_color(color_code)
+                palette = [196, 46, 220, 21, 208, 93, 226, 201, 202, 51, 82, 129, 214, 200, 198, 199]
+                color_code = palette[(Pr + Pc * distributed_matrix.grid_comm.dims[1]) % len(palette)]
+
+                matrix_str += f"\033[38;5;{color_code}m{block_str}\033[0m"
+                matrix_str += " "
+                
+                # color_code = (Pr * pmatrix.grid_comm.dims[1] + Pc) * 13 % 256
+                # print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+
+    
+            col += distributed_matrix.m_loc
+
+        # New line after each global row
+        if distributed_matrix.grid_comm.rank == 0:
+            matrix_str += "\n" 
+    
+    pmat.grid_comm.Barrier()
+    return matrix_str
+
+def print_pretty(distributed_matrix, name="", remove_padding=True, as_type=None):
+    matrix_str = distributed_matrix.pretty_string(name, remove_padding, as_type)
+    if distributed_matrix.grid_comm.rank == 0:
+        print(matrix_str, flush=True)
+
+
 
 def mpi_get_variable_statistics(x):
     local_min = np.min(x)

@@ -80,9 +80,8 @@ if __name__ == "__main__":
 
 
             operations = {
-                "from_numpy":           lambda: pmat.from_numpy(A_np),
-                "set_full (scatter)":   lambda: A_pmat.set_full(B_np),
-                "get_full (gather)":    lambda: A_pmat.get_full(),
+                "from_numpy (scatter)": lambda: pmat.from_numpy(A_np),
+                "to_numpy (gather)":    lambda: A_pmat.to_numpy(),
                 
                 "matmul":               lambda: A_pmat @ B_pmat,
                 "transpose":            lambda: A_pmat.T,
@@ -104,6 +103,7 @@ if __name__ == "__main__":
 
                 "stack_ones_on_top":    lambda: A_pmat.stack_ones_on_top(),
 
+                # NN operations
                 "ReLU":                     lambda: nn.ReLU(A_pmat),
                 "ReLU_derivative":          lambda: nn.ReLU_derivative(A_pmat),
                 "log_softmax":              lambda: nn.log_softmax(A_pmat.T),

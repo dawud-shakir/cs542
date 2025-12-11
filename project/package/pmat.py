@@ -26,9 +26,9 @@ def normalize_index(idx):
             elif np.isscalar(i):
                 normalized.append(int(i))  # Convert scalars to Python int
             # elif isinstance(i, pmat):
-            ### Use "duck-typing" to avoid refering to pmat here
-            elif hasattr(i, "get_full") and callable(i.get_full):            
-                normalized.append(np.asarray(i.get_full(), dtype=int))
+            ### Use "duck-typing" to avoid refering to pmat before it is declared below
+            elif hasattr(i, "to_numpy") and callable(i.to_numpy):            
+                normalized.append(np.asarray(i.to_numpy(), dtype=int))
 
             else:
                 raise TypeError(f"Unsupported index element type: {type(i)}")
@@ -49,75 +49,11 @@ def normalize_index(idx):
     else:
         raise TypeError(f"Unsupported index type: {type(idx)}")
 
-
-
-def soon_to_be____from_numpy(M: np.ndarray):
-    grid = create_grid_comm()
-    
-    M_shape = np.asarray(M.shape) if grid.rank == 0 else np.empty(2, dtype=np.int64)
-    M_shape = grid.bcast(M_shape, root=0)
-
-    dtype_obj = M.dtype if grid.rank == 0 else None
-    dtype = grid.bcast(dtype_obj, root=0)
-
-
-    # Create the parallel matrix    
-    parallel_matrix = pmat(M_shape[0], M_shape[1], dtype=dtype)
-    
-
-    blocks = []
-    offsets = parallel_matrix.offsets
-    extents = parallel_matrix.extents
-    
-    
-    # Only rank 0 stores the blocks to be scattered
-    if grid.rank == 0:
-        for i in range(grid.dims[0]):
-            for j in range(grid.dims[1]):
-                            
-                    # Compute the block indices within the full numpy matrix
-                    # row_start = i * parallel_matrix.n_loc
-                    # row_end = min((i + 1) * parallel_matrix.n_loc, parallel_matrix.n)
-                    # col_start = j * parallel_matrix.m_loc
-                    # col_end = min((j + 1) * parallel_matrix.m_loc, parallel_matrix.m)
-                
-                    row_start, col_start = offsets[i][j]
-                    
-                    row_end = row_start + extents[i][j][0]
-                    col_end = col_start + extents[i][j][1] 
-
-                    # This block has no data to send if extents are (0, 0)  and row_start == row_end, col_start == col_end                    
-                    block = M[row_start:row_end, col_start:col_end]
-
-                    # Append the block for scattering
-                    blocks.append(block)
-
-    # Scatter blocks to all processes
-    local_block = grid.scatter(blocks, root=0)
-    
-    
-    # Get this rank's extent to set local block
-    coords = parallel_matrix.coords
-    rank_extent = extents[coords[0]][coords[1]]
-
-    # Set local block, ignoring padding if any
-    parallel_matrix.local[:rank_extent[0], :rank_extent[1]] = local_block
-
-
-
-    return parallel_matrix
-
 ################################################################################
-# Class pmat (will probably be called p_matrix later)
-################################################################################
-
 class pmat:
+################################################################################
 
-    ############################################################################
-    # Static members and methods
-    ############################################################################
-
-    # Static grid communicator shared by all pmats
+     # Static grid communicator shared by all pmats
     grid_comm = create_grid_comm()
     use_scatter = True
 
@@ -336,72 +272,29 @@ class pmat:
         fh.Close()
         return (pmat_matrix, file_size)
 
-
-
-
-    def get_local(self):
-        n_loc, m_loc = self.extents[self.coords[0]][self.coords[1]]
-        return self.local[:n_loc, :m_loc]
-
-    def _set_local(self, local):
-        # Local block will be (n_pad, m_pad) larger than local if there is zero padding.
-        self.local = np.zeros((self.n_loc, self.m_loc), dtype=np.double)
-        self.local = np.ascontiguousarray(self.local)
-        
-        if local is not None:
-            self.local[:local.shape[0], :local.shape[1]] = local    # deep copy
- 
-
-    def set_full(self, M):
-        
-        
-
-
-        """
-        split a global matrix into blocks and scatter those blocks from rank 0 to all ranks
-        
-        :param self: Description
-        :param M: Rank with M = None just participates in the scatter 
-        """
-        blocks = []
-
-        if M is not None:
-            for i in range(pmat.grid_comm.dims[0]):
-                for j in range(pmat.grid_comm.dims[1]):
-                    row_start = i * self.n_loc
-                    row_end = min((i + 1) * self.n_loc, self.n)
-                    col_start = j * self.m_loc
-                    col_end = min((j + 1) * self.m_loc, self.m)
-                    
-                    block = M[row_start:row_end, col_start:col_end]
-                    blocks.append(block)
-
-        # Scatter blocks to all processes
-        local_block = pmat.grid_comm.scatter(blocks, root=0)
-        
-        # Set local block
-        self.local[:local_block.shape[0], :local_block.shape[1]] = local_block
-
-    def get_full(self, remove_padding=True, all_to_root=False) -> np.ndarray:
+    def to_numpy(self, remove_padding=True, all_to_root=False) -> np.ndarray | None:
         # Gather all blocks at root
         Pr = pmat.grid_comm.dims[0]
         Pc = pmat.grid_comm.dims[1]
 
-        M = np.zeros((self.n_loc * Pr, self.m_loc * Pc), dtype=self.dtype)
+        # Destination matrix with padding (if any)
+        dst_matrix = np.zeros((self.n_loc * Pr, self.m_loc * Pc), dtype=self.dtype)
 
-        # All processes gather a copy of all blocks
         all_blocks = None
+        
         if all_to_root:
+            # Root gathers a copy of every blocks
             all_blocks = pmat.grid_comm.gather(self.local, root=0)
         else:
+            # All processes gather a copy of every blocks
             all_blocks = pmat.grid_comm.allgather(self.local)
 
         if all_blocks is not None:
-      
+            
             for i, block in enumerate(all_blocks):
                 row, col = divmod(i, pmat.grid_comm.dims[1]) 
 
-                # Add padding if needed
+                # Add padding if needed to the block
                 if self.n_loc - block.shape[0] > 0:
                     block = np.pad(block, ((0, self.n_loc - block.shape[0]), (0,0)))
                                    
@@ -409,154 +302,53 @@ class pmat:
                     block = np.pad(block, ((0,0), (0, self.m_loc - block.shape[1])))
 
                 # Copy block into grid
-                M[row*self.n_loc:(row+1)*self.n_loc, col*self.m_loc:(col+1)*self.m_loc] = block #.reshape(self.n_loc, self.m_loc)
+                dst_matrix[row*self.n_loc:(row+1)*self.n_loc, col*self.m_loc:(col+1)*self.m_loc] = block #.reshape(self.n_loc, self.m_loc)
 
 
         if all_to_root:
             # Only root has the full matrix
             if pmat.grid_comm.rank == 0:
-                return M[:self.n, :self.m] if remove_padding else M
+                return dst_matrix[:self.n, :self.m] if remove_padding else dst_matrix
             else:
                 return None
         else:
-            return M[:self.n, :self.m] if remove_padding else M
+            return dst_matrix[:self.n, :self.m] if remove_padding else dst_matrix
 
     @staticmethod
-    def from_numpy(M_numpy: np.ndarray, dtype=np.float64) -> 'pmat':
-        M_numpy = np.atleast_2d(M_numpy) if M_numpy is not None else None
+    def from_numpy(src_matrix: np.ndarray, dtype=np.float64) -> 'pmat':
+        if src_matrix is not None:
+            src_matrix = np.atleast_2d(src_matrix)
 
         # Make sure all processes know the shape and dtype, even if only rank 0 has the numpy array
-        shape = pmat.grid_comm.bcast(M_numpy.shape if M_numpy is not None else None, root=0)
+        shape = pmat.grid_comm.bcast(src_matrix.shape if src_matrix is not None else None, root=0)
         n, m = shape[0], shape[1]
 
-        dtype=pmat.grid_comm.bcast(M_numpy.dtype if M_numpy is not None else None, root=0)
-        if pmat.use_scatter:
-            ### Set with scatter #############
-            M_pmat = pmat(n, m, dtype=dtype)
-            M_pmat.set_full(M_numpy)      #<---- use scatter
-            return M_pmat
+        dtype=pmat.grid_comm.bcast(src_matrix.dtype if src_matrix is not None else None, root=0)
         
-        ### Set with shared memory #############
+        distributed_matrix = pmat(n, m, dtype=dtype)
 
-        coords = pmat.grid_comm.coords
+        blocks = []
 
-        ########################################################################
-        # Create a new pmat and its extent and position before reading 
-        # numpy array from shared memory
-        ########################################################################
-
-        M_pmat = pmat(n, m, dtype=dtype)
-        extent = M_pmat.extents[coords[0]][coords[1]]
-        position = M_pmat.offsets[coords[0]][coords[1]]
-
-        row_start, row_end = position[0], position[0] + extent[0]
-        col_start, col_end = position[1], position[1] + extent[1]
-
-        local = M_pmat.local    # Using full local array here (not just extent)
-
-        ########################################################################
-        # Set up the shared array
-        ########################################################################
-        type = M_pmat.dtype
-
-        type_bytes = np.dtype(type).itemsize
-        size = int(np.prod(M_pmat.shape)) * type_bytes
-
-        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
-
-        assert win is not None, "win is None"
-            
-        # Buffer is allocated by rank 0, but all processes can access it
-        buf, _ = win.Shared_query(0)
-        shared_array = np.ndarray(buffer=buf, dtype=type, shape=(M_pmat.n, M_pmat.m))
-
-        shared_array[:] = M_numpy[:]
-
-        ############################################################################
-        # Start an epoch and synchronize processes before reading
-        ############################################################################
-        win.Fence()
-
-        # Each rank reads its submatrix block from the shared array
-        local[:extent[0], :extent[1]] = shared_array[row_start:row_end, col_start:col_end]
-        M_pmat.local = local.copy()  # Added copy ... didn't fix the issue
-        
-        ############################################################################
-        # End the epoch and synchronize processes
-        ############################################################################
-        win.Fence()
-
-        # Free the shared memory
-        win.free()
-
-        return M_pmat
-    
-    def pretty_string(self, name="", remove_padding=True, as_type=None):
-
-        if name != "":
-            if self.grid_comm.rank == 0:
-                print(f"{name}:")
-
-        if as_type is None:
-            if self.local.dtype == np.int32 or self.local.dtype == np.int64:
-                as_type = "i"
-            elif self.local.dtype == np.float32:
-                as_type = "f"
-            elif self.local.dtype == np.float64:
-                as_type = "d"
-            elif self.local.dtype == np.bool_:
-                as_type = "b"
-            else:
-                raise ValueError(f"Unsupported dtype for pretty print: {self.local.dtype}")
-
-        full_matrix = self.get_full(remove_padding)
-        matrix_str = ""            
-        
-        for row in range(self.n if remove_padding else self.n + self.n_pad):
-            col = 0
-
-            if row % self.n_loc == 0:
-                row_color = (row * self.m) // self.n_loc
-            while col < self.m:
-                color_code = 31 + ((row_color + col))   # 7 possible colors
-                # print(f"row {row} col {j} color {color_code}", flush=True)
-                
-                if as_type == "i":
-                    block_str = " ".join(f"{int(val):3d}" for val in full_matrix[row][col : col + self.m_loc])
-                elif as_type == "f" or as_type == "d":
-                    block_str = "\b" + "".join(f"{float(val):10.1f}" for val in full_matrix[row][col : col + self.m_loc])
-                elif as_type == "b":
-                    block_str = "\b" + "".join(f"{val}" for val in full_matrix[row][col : col + self.m_loc])                
-
-                if self.grid_comm.rank == 0:
-                    Pr = row // self.n_loc
-                    Pc = col // self.m_loc
-                    # color_code = 31 + (Pr + Pc) % 7  # 7 possible colors
-                    # set_text_color(color_code)
-                    palette = [196, 46, 220, 21, 208, 93, 226, 201, 202, 51, 82, 129, 214, 200, 198, 199]
-                    color_code = palette[(Pr + Pc * self.grid_comm.dims[1]) % len(palette)]
-
-                    matrix_str += f"\033[38;5;{color_code}m{block_str}\033[0m"
-                    matrix_str += " "
+        # Only ranks with the stored blocks will be scattered
+        if src_matrix is not None:
+            for i in range(pmat.grid_comm.dims[0]):
+                for j in range(pmat.grid_comm.dims[1]):
+                    row_start = i * distributed_matrix.n_loc
+                    row_end = min((i + 1) * distributed_matrix.n_loc, distributed_matrix.n)
+                    col_start = j * distributed_matrix.m_loc
+                    col_end = min((j + 1) * distributed_matrix.m_loc, distributed_matrix.m)
                     
-                    # color_code = (Pr * pmatrix.grid_comm.dims[1] + Pc) * 13 % 256
-                    # print(f"\033[38;5;{color_code}m{block_str}\033[0m", end=" ", flush=True)
+                    block = src_matrix[row_start:row_end, col_start:col_end]
+                    blocks.append(block)
 
+        # Scatter blocks to all processes
+        local_block = pmat.grid_comm.scatter(blocks, root=0)
         
-                col += self.m_loc
-
-            # New line after each global row
-            if self.grid_comm.rank == 0:
-                matrix_str += "\n" 
+        # Set local block
+        distributed_matrix.local[:local_block.shape[0], :local_block.shape[1]] = local_block
         
-        pmat.grid_comm.Barrier()
-        return matrix_str
-
-    def print_pretty(self, name="", remove_padding=True, as_type=None):
-        matrix_str = self.pretty_string(name, remove_padding, as_type)
-        if self.grid_comm.rank == 0:
-            print(matrix_str, flush=True)
-
+        return distributed_matrix
+    
     ############################################################################
     # Constructor
     ############################################################################
@@ -694,7 +486,7 @@ class pmat:
         return f"pmat({self.n}x{self.m}) at coords {self.coords} with local shape {self.local.shape})"
     
     def __str__(self):
-        return f"{self.get_full()}"
+        return f"{self.to_numpy()}"
     
     def astype(self, dtype):
         return pmat(self.n, self.m, self.local.astype(dtype))
@@ -750,7 +542,7 @@ class pmat:
         assert self.m > 1, "matrix only has one column"
     
         if pmat.use_scatter:
-            all_blocks = self.get_full(all_to_root=True)
+            all_blocks = self.to_numpy(all_to_root=True)
             
 
             # Remove first column
@@ -893,34 +685,6 @@ class pmat:
             else:
                 A_local = B.col_comm.bcast(A_local, root=0)
                 return A_local, B_local, output_shape
-            
-            
-        
-        # Originally: col_comm and row_comm switched
-        # if B.shape == (A.n, 1) and B.m != A.m:  
-        #   if A.col_comm == MPI.COMM_NULL:
-        #         return A_local, A_local, output_shape
-        #     else:
-        #         B_local = A.row_comm.bcast(B_local, root=0)
-        #         return A_local, B_local, output_shape
-        # elif A.shape == (B.n, 1) and A.m != B.m:           
-        #     if B.col_comm == MPI.COMM_NULL:
-        #         return B_local, B_local, output_shape
-        #     else:
-        #         A_local = B.col_comm.bcast(A_local, root=0)
-        #         return A_local, B_local, output_shape
-        # elif B.shape == (1, A.m) and B.n != A.n:  
-        #     if A.row_comm == MPI.COMM_NULL:
-        #         return A_local, A_local, output_shape
-        #     else:         
-        #         B_local = A.row_comm.bcast(B_local, root=0)
-        #         return A_local, B_local, output_shape
-        # elif A.shape == (1, B.m) and A.n != B.n:
-        #     if B.row_comm == MPI.COMM_NULL:
-        #         return B_local, B_local, output_shape
-        #     else:
-        #         A_local = B.row_comm.bcast(A_local, root=0)
-        #         return A_local, B_local, output_shape
 
         #######################################################################
         # Nevermind: Both are matrices or both are vectors of the same shape
@@ -1015,14 +779,10 @@ class pmat:
     #     return self
 
     def __matmul__(self, other: 'pmat'):
-        
+        # Using Cannon's Algorithm
 
 
-        return matmul(self, other)
-
-        # Cannon's Algorithm
-
-        assert self.m == other.n, f"A @ B: A.m  = {self.m} and B.n = {other.n}"
+        assert self.m == other.n, f"A @ B: A.m:{self.m} != B.n:{other.n}"
 
         C = np.zeros((self.n_loc, other.m_loc))
 
@@ -1030,29 +790,29 @@ class pmat:
         num_steps = min(pmat.grid_comm.dims)
 
         # Deep copies for Sendrecv_replace
-        A = self.local.copy()
-        B = other.local.copy()
+        A_block = self.local.copy()
+        B_block = other.local.copy()
 
         # Skew (initial alignment)
         for _ in range(self.coords[0]):
             src, dst = pmat.grid_comm.Shift(1, -1)
-            pmat.grid_comm.Sendrecv_replace(A, dest=dst, source=src)
+            pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
 
         for _ in range(self.coords[1]):
             src, dst = pmat.grid_comm.Shift(0, -1)
-            pmat.grid_comm.Sendrecv_replace(B, dest=dst, source=src)
+            pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
 
         for _ in range(num_steps):
             # Multiply and accumulate
-            C += A @ B
+            C += A_block @ B_block
 
             # Shift A left
             src, dst = pmat.grid_comm.Shift(1, -1)
-            pmat.grid_comm.Sendrecv_replace(A, dest=dst, source=src)
+            pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
 
             # Shift B up
             src, dst = pmat.grid_comm.Shift(0, -1)
-            pmat.grid_comm.Sendrecv_replace(B, dest=dst, source=src)
+            pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
 
         return pmat(self.n, other.m, local=C)
     
@@ -1423,7 +1183,7 @@ class pmat:
     def stack_ones_on_top(self: 'pmat') -> 'pmat':
     
         if pmat.use_scatter:
-            all_blocks = self.get_full(all_to_root=True)
+            all_blocks = self.to_numpy(all_to_root=True)
             
 
             # Add a row of ones on top
@@ -1572,27 +1332,6 @@ def matmul(A: pmat, B: pmat):
         pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
 
     return pmat(A.n, B.m, local=C)
-
-
-
-
-
-
-if __name__ == "__main__":
-#     # Test input
-
-        # Large matrices
-#     test(n=1000, k=2000, m=10000)
-
-#     test(n=28*28, k=64, m=64)
-
-    # Non-square matrices
-    test(n=9, k=5, m=16)
-
-    # Square matrices
-    test(n=8, k=8, m=16)
-
-
 
 
 

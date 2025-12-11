@@ -6,24 +6,23 @@ main.py
 # Imports and Setup
 ################################################################################
 
-
 import numpy as np
 np.random.seed(0)  # Reproducibility
 np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
 
-import package.layer as nn
 
-import os               # for file paths
-import psutil         # for memory usage
+
+#
+import os               # file paths
+import psutil           # memory usage
 proc = psutil.Process(os.getpid())
 
 
-import sys
+import sys              # unbuffered print output
 
-# Set before running: export PYTHONUNBUFFERED=1
-# or ...
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(line_buffering=True) # make print output unbuffered (flush by default)
+    # Make print output unbuffered (flush immediately)
+    sys.stdout.reconfigure(line_buffering=True) 
 
 from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent
@@ -35,6 +34,7 @@ show_plots = True
 
 from mpi4py import MPI
 from package.pmat import pmat
+import package.layer as nn
 from package.mnist import read_mnist_data
 from package.utilities import get_memory_usage
 
@@ -111,14 +111,6 @@ def load_data_files():
     return p_X_train, p_y_train, p_X_test, p_y_test
 
 
-# X_train, y_train, X_test, y_test = read_mnist_data()
-
-# Uncomment to write data files once
-# write_data_files()
-# if MPI.COMM_WORLD.Get_rank() == 0:
-#     print("Wrote data files."); 
-
-
 p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
 
 
@@ -139,25 +131,42 @@ stop_at_loss = None          #0.01 # 1.0          # 0.01
 stop_at_epoch = None        # 5
 stop_at_batch = None        # 272
 
-scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0 # scale factor for hidden layer size
 
-hidden_size = int(64*scale)
+################################################################################
+# Layers
+################################################################################
 
-# 28*28 = 784 input features
-fc1 = nn.Parallel_Layer(input_size=28*28,  output_size=hidden_size); fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc2 = nn.Parallel_Layer(input_size=hidden_size, output_size=hidden_size); fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
+# Scale factor for hidden layer size
+scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0 
+hidden_size = int(64 * scale)
+
+# MNIST has 784 input features
+n_features = 784
+
+# MNIST has 10 output classes (digits 0-9)
+n_outputs = 10
+
+# Input layer
+fc1 = nn.Parallel_Layer(input_size=n_features,  output_size=hidden_size);
+fc1.phi, fc1.phi_prime = nn.ReLU, nn.ReLU_derivative
+
+# First hidden layer
+fc2 = nn.Parallel_Layer(input_size=hidden_size, output_size=hidden_size); 
+fc2.phi, fc2.phi_prime = nn.ReLU, nn.ReLU_derivative
+
+# Second hidden layer
 fc3 = nn.Parallel_Layer(input_size=hidden_size, output_size=hidden_size); fc3.phi, fc3.phi_prime = nn.ReLU, nn.ReLU_derivative
-fc4 = nn.Parallel_Layer(input_size=hidden_size, output_size=10); fc4.phi= nn.log_softmax 
 
-################################################################################
-# Testing 
-################################################################################
+# Output layer
+fc4 = nn.Parallel_Layer(input_size=hidden_size, output_size=n_outputs); 
+fc4.phi= nn.log_softmax 
+
+
+# Evaluation accuracy on testing dataset
 def evaluate():
-    """ Test - no gradients, just forward pass."""
     p_X = p_X_test  # (batch_size, 784)
     p_Y = p_y_test  # (batch_size,)
 
-    ############ Forward pass ############
     h1 = fc1.forward(p_X)                       # (hidden_size, batch_size)
     h2 = fc2.forward(h1)                        # (hidden_size, batch_size)
     h3 = fc3.forward(h2)                        # (hidden_size, batch_size)
@@ -165,32 +174,12 @@ def evaluate():
     # Raw logits, so no activation yet
     p_logits = fc4.forward(h3)                  # (10, batch_size)
 
-
     # Apply log_softmax
     p_log_probs = nn.log_softmax(p_logits.T)    # (batch_size, 10)
+    
     test_accuracy = np.sum(np.argmax(p_log_probs, axis=1) == p_Y) / p_Y.shape[0]
 
     return test_accuracy
-
-    # h1 = fc1.forward(p_X_test)   # (64, batch)
-    # h2 = fc2.forward(h1)  # (10, 100)
-    # h3 = fc3.forward(h2)  # (10, 100)
-    # p_logits = fc4.forward(h3)  # Raw logits, no activation yet
-
-    # ######### patmat version ##########
-    # # Apply log_softmax manually
-    # # p_log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
-    # # y_hat = np.argmax(p_log_probs.get_full(), axis=1)  # Predicted class labels
-
-    # ####### Original version ##########
-    # # Apply log_softmax manually
-    # log_probs = nn.log_softmax(logits.T)  # Shape: (batch_size, 10)
-    # y_hat = np.argmax(log_probs, axis=1)  # Predicted class labels
-
-    # return np.sum(np.argmax(p_log_probs, axis=1) == p_Y) / p_Y.shape[0]
-################################################################################
-# Main
-################################################################################
 
 def main():
 

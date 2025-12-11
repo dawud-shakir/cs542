@@ -160,7 +160,7 @@ class Parallel_Layer:
         if self.weight_decay != 0:
             p_g = p_g + self.weight_decay * self.p_W
 
-        # Copy in case MPI-communicator is freed during update
+        # Copy in case MPI-communicator is freed during update 
         p_m = self.m 
         p_v = self.v
 
