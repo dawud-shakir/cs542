@@ -8,12 +8,8 @@ from mpi4py import MPI
 from package.utilities import create_grid_comm
 import package.utilities as utils
 
-################################################################################
-# Normalize an index to a form NumPy can handle for advanced indexing.
-#   - Converts arrays/lists to NumPy int arrays.
-#   - Leave slices, scalars, and tuples intact but normalize their content.
-################################################################################
 def normalize_index(idx):
+    # arrays/lists to int arrays. slices, scalars, and tuples stay the same but normalize their content
 
     if isinstance(idx, tuple):
         # For tuples (e.g., (row_idx, col_idx)), normalize each element
@@ -52,6 +48,209 @@ def normalize_index(idx):
 ################################################################################
 class pmat:
 ################################################################################
+    def apply(self, fn, approach='auto'):
+        """
+        Apply a user-supplied function 'fn' to the full matrix represented by this pmat.
+
+        approach:
+          - 'auto'   : pick 'numpy' if pmat.use_scatter True (safe), else prefer 'shared'
+          - 'numpy'  : gather full matrix on root, apply fn there, scatter back (uses to_numpy/from_numpy)
+          - 'shared' : use MPI.Win.Allocate_shared if available to create a shared one-buffer,
+                       rank 0 applies the function, then it's turned into a pmat via from_shared_buffer
+          - 'rma'    : use MPI one-sided Put/Get to write to a root buffer, apply fn on root,
+                       then have other ranks Get their block back from root
+
+        The provided function 'fn' should either:
+          - modify the array in-place and return None, or
+          - return a new numpy array of the same shape.
+
+        Returns a new pmat with the operation result (self is unchanged).
+        """
+        if not callable(fn):
+            raise TypeError("fn must be callable")
+
+        if approach == 'auto':
+            # Safe choice: if pmat.use_scatter, do a scatter/gather approach (to_numpy / from_numpy).
+            # Otherwise prefer shared memory if available.
+            approach = 'numpy' if pmat.use_scatter else 'shared'
+
+        if approach == 'numpy':
+            return self._apply_via_numpy(fn)
+        elif approach == 'shared':
+            return self._apply_via_shared(fn)
+        elif approach == 'rma':
+            return self._apply_via_rma(fn)
+        else:
+            raise ValueError("approach must be one of 'auto', 'numpy', 'shared', or 'rma'")
+
+    def _apply_via_numpy(self, fn):
+        # Gather to root synchronously, apply function on root, and scatter result.
+        # All ranks call to_numpy(all_to_root=True), root gets full matrix, else None
+        full = self.to_numpy(all_to_root=False)  # root will have full matrix, others None
+        
+        print(f"{pmat.grid_comm.coords}: here in apply_via_numpy")
+        root = pmat.grid_comm.rank == 0
+  
+        if root:
+            out = fn(full)
+            
+            if out is None:
+                # assume in-place modification
+                out = full
+            # Validate
+            out = np.atleast_2d(out)
+            assert out.shape == (self.n, self.m), "fn returned array of wrong shape"
+        else:
+            
+
+            out = None
+
+        # from_numpy will broadcast shape/dtype and scatter blocks
+        return pmat.from_numpy(out, dtype=self.dtype)
+
+    def _apply_via_shared(self, fn):
+        # Allocate a shared window (one buffer accessible to all ranks).
+        # Each rank writes its local block to the shared array; root applies fn;
+        # then we create a new pmat via from_shared_buffer which copies out appropriate local blocks.
+        grid = pmat.grid_comm
+        dtype = self.dtype
+        coords = self.coords
+        n, m = self.shape
+        itemsize = np.dtype(dtype).itemsize
+
+        size = int(np.prod((n, m))) * itemsize
+
+        # Allocate shared memory across ranks in grid_comm
+        win = MPI.Win.Allocate_shared(size, disp_unit=itemsize, comm=grid)
+        # Buffer belongs to rank 0, but all processes can Shared_query(0)
+        buf, _ = win.Shared_query(0)
+        shared_array = np.ndarray(buffer=buf, dtype=dtype, shape=(n, m))
+
+        # Start epoch - synchronize before writes
+        win.Fence()
+
+        # Compute local write region
+        extent = self.extents[coords[0]][coords[1]]
+        pos = self.offsets[coords[0]][coords[1]]
+        row_start, row_end = pos[0], pos[0] + extent[0]
+        col_start, col_end = pos[1], pos[1] + extent[1]
+        local = self.local[:extent[0], :extent[1]]
+
+        if extent[0] > 0 and extent[1] > 0:
+            shared_array[row_start:row_end, col_start:col_end] = local
+
+        # Ensure all writes complete
+        win.Fence()
+
+        # Only root applies the lambda (avoid duplicating side effects)
+        if grid.rank == 0:
+            res = fn(shared_array)
+            if res is not None:
+                res = np.atleast_2d(res)
+                assert res.shape == (n, m), "fn returned array of wrong shape"
+                shared_array[:] = res
+
+        # Wait for function to complete on root and changes to be visible on other ranks
+        win.Fence()
+
+        # Use reusable factory to create a pmat reading from shared memory
+        new_pmat = pmat.from_shared_buffer(win, shared_array, dtype=dtype)
+
+        # Free the shared memory window
+        try:
+            win.Free()
+        except Exception:
+            # Some platforms use win.free()
+            try:
+                win.free()
+            except Exception:
+                pass
+
+        return new_pmat
+
+    def _apply_via_rma(self, fn):
+        # RMA approach: gather the whole matrix to a root buffer using Put,
+        # apply fn on root, then Get local blocks back from root.
+        grid = pmat.grid_comm
+        dtype = self.dtype
+        coords = self.coords
+        n, m = self.shape
+        itemsize = np.dtype(dtype).itemsize
+        root = 0
+
+        # root will hold the full array as a 1D contiguous buffer; others have no backing memory
+        if grid.rank == root:
+            root_buf = np.zeros((n * m,), dtype=dtype)
+        else:
+            root_buf = None
+
+        # Create a window exposing root_buf on the root, None elsewhere
+        win = MPI.Win.Create(root_buf, disp_unit=itemsize, comm=grid)
+
+        # compute local region offsets (flat offset in elements)
+        extent = self.extents[coords[0]][coords[1]]
+        pos = self.offsets[coords[0]][coords[1]]
+        row_start, row_end = pos[0], pos[0] + extent[0]
+        col_start, col_end = pos[1], pos[1] + extent[1]
+        local = self.local[:extent[0], :extent[1]]
+        # flattened length / target disp
+        local_flat_len = int(extent[0] * extent[1])
+        if local_flat_len > 0:
+            # flat starting position in root_buf elements
+            target_disp = int(row_start * m + col_start)
+
+            # Put local block into root window
+            win.Lock(root)
+            # Put expects data formats and uses MPI datatype; default numeric dtype=double
+            mpi_type = MPI.DOUBLE if dtype == np.float64 else (MPI.FLOAT if dtype == np.float32 else MPI.BYTE)
+            win.Put([local.ravel(), mpi_type], target_rank=root, target_disp=target_disp)
+            win.Unlock(root)
+
+        # Make sure all puts are finished
+        grid.Barrier()
+
+        # Only root applies the function to the full buffer
+        if grid.rank == root:
+            # View as 2D
+            full = root_buf.reshape((n, m))
+            res = fn(full)
+            if res is not None:
+                res = np.atleast_2d(res)
+                assert res.shape == (n, m), "fn returned array of wrong shape"
+                full[:] = res
+
+        # Barrier to ensure root modification done
+        grid.Barrier()
+
+        # Each rank now retrieves its local block from the root buffer using Get
+        new_local = np.zeros_like(self.local)  # allocate storage for the new local block
+        if local_flat_len > 0:
+            recv_flat = np.empty((local_flat_len,), dtype=dtype)
+            win.Lock(root)
+            mpi_type = MPI.DOUBLE if dtype == np.float64 else (MPI.FLOAT if dtype == np.float32 else MPI.BYTE)
+            win.Get([recv_flat, mpi_type], target_rank=root, target_disp=target_disp)
+            win.Unlock(root)
+
+            # reshape into local block shape and copy to new_local
+            new_local[:extent[0], :extent[1]] = recv_flat.reshape(extent[0], extent[1])
+
+        # Ensure all gets finished
+        grid.Barrier()
+
+        # Free window
+        try:
+            win.Free()
+        except Exception:
+            try:
+                win.free()
+            except Exception:
+                pass
+
+        # Create a new pmat with the same global shape and this process's new local block
+        new_pmat = pmat(self.n, self.m, local=new_local, dtype=dtype)
+        return new_pmat
+
+
 
      # Static grid communicator shared by all pmats
     grid_comm = create_grid_comm()
@@ -147,10 +346,12 @@ class pmat:
         return newmat
 
     @staticmethod
-    def fancy_indexing_rows(A: 'pmat', idx):
+    def index_rows(A: 'pmat', idx):
         # idx can be a scalar, a slice, a list, or an array of integers
         # idx can have duplicates and be out of order
         
+
+
         if np.isscalar(idx):
             idx = np.array([idx])
         elif isinstance(idx, list):
@@ -165,10 +366,25 @@ class pmat:
         if idx.shape[0] != 1:
             raise NotImplementedError("Only 1D row vector indexes are supported")
 
-        
         # idx is a row vector: (1, n_elements)
         n_elements = idx.shape[1]  # number of rows to select
 
+        full_matrix = A.to_numpy()
+        # if MPI.COMM_WORLD.rank == 0:
+        #     print(idx)
+        # values = []
+        # for (i,j) in enumerate(idx[0]):     
+        #     # i=the i-th element of idx (0, 1, 2 ...), j=the indexed row of full_matrix
+            
+        #     values.append(full_matrix[j,:])
+
+        # indexed_rows = 
+
+        return pmat.from_numpy(full_matrix[idx[0]], dtype=A.dtype)
+
+
+
+        
         ########################################################################
         # Set up the shared array
         ########################################################################
@@ -189,9 +405,6 @@ class pmat:
         ############################################################################
         # 
         for (B_row, A_row) in enumerate(idx[0]):
-            # if rank == 0: 
-            #     print("A_row:", A_row, "B_row:", B_row)
-
             # Compute grid row rank in A and local row index
             A_block, A_block_row  = divmod(A_row, A.n_loc)
 
@@ -281,14 +494,13 @@ class pmat:
         dst_matrix = np.zeros((self.n_loc * Pr, self.m_loc * Pc), dtype=self.dtype)
 
         all_blocks = None
-        
+
         if all_to_root:
             # Root gathers a copy of every blocks
             all_blocks = pmat.grid_comm.gather(self.local, root=0)
         else:
             # All processes gather a copy of every blocks
             all_blocks = pmat.grid_comm.allgather(self.local)
-
         if all_blocks is not None:
             
             for i, block in enumerate(all_blocks):
@@ -498,7 +710,7 @@ class pmat:
         if isinstance(idx, np.ndarray) and idx.ndim == 1:
             # 1D array indexing is treated as row indexing
             idx = np.atleast_2d(idx)
-            return pmat.fancy_indexing_rows(self, idx)
+            return pmat.index_rows(self, idx)
 
         # idx0 = [idx[0]] if isinstance(idx[0], int) else idx[0]
         # idx1 = [idx[1]] if isinstance(idx[1], int) else idx[1]
