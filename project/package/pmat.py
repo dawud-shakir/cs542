@@ -349,9 +349,8 @@ class pmat:
     def index_rows(A: 'pmat', idx):
         # idx can be a scalar, a slice, a list, or an array of integers
         # idx can have duplicates and be out of order
-        
-
-
+    
+        # Make sure idx is an array
         if np.isscalar(idx):
             idx = np.array([idx])
         elif isinstance(idx, list):
@@ -369,73 +368,62 @@ class pmat:
         # idx is a row vector: (1, n_elements)
         n_elements = idx.shape[1]  # number of rows to select
 
-        full_matrix = A.to_numpy()
-        # if MPI.COMM_WORLD.rank == 0:
-        #     print(idx)
-        # values = []
-        # for (i,j) in enumerate(idx[0]):     
-        #     # i=the i-th element of idx (0, 1, 2 ...), j=the indexed row of full_matrix
-            
-        #     values.append(full_matrix[j,:])
-
-        # indexed_rows = 
-
-        return pmat.from_numpy(full_matrix[idx[0]], dtype=A.dtype)
-
-
-
-        
-        ########################################################################
-        # Set up the shared array
-        ########################################################################
-        type = A.dtype
-
-        type_bytes = np.dtype(type).itemsize
-        shape = (n_elements, A.m)
-        size = int(np.prod(shape)) * type_bytes
-
-        win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
-
-        assert win is not None, "win is None"
-            
-        # Buffer is allocated by rank 0, but all processes can access it
-        buf, _ = win.Shared_query(0)
-        shared_array = np.ndarray(buffer=buf, dtype=type, shape=shape)
-
-        ############################################################################
-        # 
-        for (B_row, A_row) in enumerate(idx[0]):
-            # Compute grid row rank in A and local row index
-            A_block, A_block_row  = divmod(A_row, A.n_loc)
-
-            if A_block == A.coords[0]:
-                # Ranks that made it here have a nonempty block if they are in A's row comm
-                row_comm = A.row_comm
-                if row_comm == MPI.COMM_NULL:
-                    continue
-
-                # The row allgather copies into needs to be the full nonempty row size (with padding) because of the way allgather works
-
-                row = np.empty((A.m_loc * row_comm.Get_size()), dtype=A.dtype)
-                A.row_comm.Allgather(A.local[A_block_row], row)
-                row = row[:A.m]  # Trim any padding from the last nonempty block
-                
-                shared_array[B_row] = row
-
-        # Synchronize writes across all ranks (this is done in from_shared_buffer as well, but just to be safe)
-        win.Fence()
-
         if pmat.use_scatter:
-            # Scatter the shared array to all processes
-            B = pmat.from_numpy(shared_array, dtype=A.dtype)
-        else:
-            # Convert shared array to a pmat 
-            B = pmat.from_shared_buffer(win, shared_array, dtype=A.dtype)
+            full_matrix = A.to_numpy()
+            return pmat.from_numpy(full_matrix[idx[0]], dtype=A.dtype)
 
-        # Clean up
-        win.Free()
+        else:        
+            ########################################################################
+            # Set up the shared array
+            ########################################################################
+            type = A.dtype
 
-        return B
+            type_bytes = np.dtype(type).itemsize
+            shape = (n_elements, A.m)
+            size = int(np.prod(shape)) * type_bytes
+
+            win = MPI.Win.Allocate_shared(size, disp_unit=type_bytes, comm=pmat.grid_comm)
+
+            assert win is not None, "win is None"
+                
+            # Buffer is allocated by rank 0, but all processes can access it
+            buf, _ = win.Shared_query(0)
+            shared_array = np.ndarray(buffer=buf, dtype=type, shape=shape)
+
+            ############################################################################
+            # 
+            for (B_row, A_row) in enumerate(idx[0]):
+                # Compute grid row rank in A and local row index
+                A_block, A_block_row  = divmod(A_row, A.n_loc)
+
+                if A_block == A.coords[0]:
+                    # Ranks that made it here have a nonempty block if they are in A's row comm
+                    row_comm = A.row_comm
+                    if row_comm == MPI.COMM_NULL:
+                        continue
+
+                    # The row allgather copies into needs to be the full nonempty row size (with padding) because of the way allgather works
+
+                    row = np.empty((A.m_loc * row_comm.Get_size()), dtype=A.dtype)
+                    A.row_comm.Allgather(A.local[A_block_row], row)
+                    row = row[:A.m]  # Trim any padding from the last nonempty block
+                    
+                    shared_array[B_row] = row
+
+            # Synchronize writes across all ranks (this is done in from_shared_buffer as well, but just to be safe)
+            win.Fence()
+
+            if pmat.use_scatter:
+                # Scatter the shared array to all processes
+                B = pmat.from_numpy(shared_array, dtype=A.dtype)
+            else:
+                # Convert shared array to a pmat 
+                B = pmat.from_shared_buffer(win, shared_array, dtype=A.dtype)
+
+            # Clean up
+            win.Free()
+
+            return B
 
 
 

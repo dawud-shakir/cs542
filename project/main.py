@@ -183,6 +183,25 @@ def evaluate():
 
 def main():
 
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    n_processes = comm.Get_size()
+    
+    # Find out the node number
+    node_name = MPI.Get_processor_name()
+    all_node_names = comm.gather(node_name, root=0)
+
+    if rank == 0:
+        # Get unique node names and sort them to assign node numbers
+        unique_nodes = sorted(set(all_node_names))
+        node_mapping = {name: idx for idx, name in enumerate(unique_nodes)}
+    else:
+        node_mapping = None
+
+    node_mapping = comm.bcast(node_mapping, root=0)
+    node_number = node_mapping[node_name]
+    n_nodes = len(node_mapping)
+
     pixel_value_min, pixel_value_max = p_X_train.pmin(), p_X_train.pmax()
     if MPI.COMM_WORLD.Get_rank() == 0:
         print(f"Training data: {p_X_train.shape}, Labels: {p_y_train.shape}")
@@ -217,7 +236,7 @@ def main():
         
         print("Learning rate (alpha):", alpha)
         print("Total epochs:", n_epochs)
-        print("Number of processes:", MPI.COMM_WORLD.Get_size())
+        print("Number of processes:", n_processes, "Number of nodes:", n_nodes)
         print("MPI Wtime accuracy: ", MPI.Wtick())
 
     
@@ -269,48 +288,6 @@ def main():
             p_X = p_X_train[batch_idx]  # (batch_size, 784)
             p_Y = p_y_train[batch_idx]  # (batch_size,)
 
-
-
-            # all_blocks = p_X.get_full(all_to_root=True)
-            
-            # if MPI.COMM_WORLD.rank == 0:
-            #     print("Full batch data shape at root:", all_blocks.shape)
-            # else:
-            #     print("all_blocks is None=", all_blocks is None, " at rank", MPI.COMM_WORLD.rank)
-
-            # # Remove first column
-            
-            # all_blocks_with_bias = np.hstack([np.ones((all_blocks.shape[0], 1)), all_blocks]) if all_blocks is not None else None # 
-            # with_bias = pmat.from_numpy(all_blocks_with_bias)   
-
-
-            # if with_bias is not None:
-            #     print("With bias shape at rank", MPI.COMM_WORLD.rank, ":", with_bias.shape)
-            # else:
-            #     print("with_bias is None=", with_bias is None, " at rank", MPI.COMM_WORLD.rank)
-
-
-            # all_blocks = p_X.get_full(all_to_root=True)
-            
-            # if MPI.COMM_WORLD.rank == 0:
-            #     print("Full batch data shape at root:", all_blocks.shape)
-            # else:
-            #     print("all_blocks is None=", all_blocks is None, " at rank", MPI.COMM_WORLD.rank)
-
-            # # Remove first column
-            
-            # all_blocks_no_bias = all_blocks[:, 1:] if all_blocks is not None else None # 
-            
-            # no_bias = pmat.from_numpy(all_blocks_no_bias)   
-
-
-            # if no_bias is not None:
-            #     print("With bias shape at rank", MPI.COMM_WORLD.rank, ":", no_bias.shape)
-            # else:
-            #     print("with_bias is None=", no_bias is None, " at rank", MPI.COMM_WORLD.rank)
-
-            
-            # exit()
 
             ############ Forward pass ############
             h1 = fc1.forward(p_X)                       # (hidden_size, batch_size)
