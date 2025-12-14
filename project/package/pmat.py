@@ -1,3 +1,10 @@
+"""
+pmat.py
+
+Distributed matrix container (pmat) built on top of mpi4py and NumPy for
+parallel matrix computations. Note that NumPy calls are overloaded to operate on pmat objects.
+"""
+
 from math import ceil
 import warnings
 import os # for file paths
@@ -48,128 +55,8 @@ def normalize_index(idx):
 ################################################################################
 class pmat:
 ################################################################################
-    def apply(self, fn, approach='auto'):
-        """
-        Apply a user-supplied function 'fn' to the full matrix represented by this pmat.
-
-        approach:
-          - 'auto'   : pick 'numpy' if pmat.use_scatter True (safe), else prefer 'shared'
-          - 'numpy'  : gather full matrix on root, apply fn there, scatter back (uses to_numpy/from_numpy)
-          - 'shared' : use MPI.Win.Allocate_shared if available to create a shared one-buffer,
-                       rank 0 applies the function, then it's turned into a pmat via from_shared_buffer
-          - 'rma'    : use MPI one-sided Put/Get to write to a root buffer, apply fn on root,
-                       then have other ranks Get their block back from root
-
-        The provided function 'fn' should either:
-          - modify the array in-place and return None, or
-          - return a new numpy array of the same shape.
-
-        Returns a new pmat with the operation result (self is unchanged).
-        """
-        if not callable(fn):
-            raise TypeError("fn must be callable")
-
-        if approach == 'auto':
-            # Safe choice: if pmat.use_scatter, do a scatter/gather approach (to_numpy / from_numpy).
-            # Otherwise prefer shared memory if available.
-            approach = 'numpy' if pmat.use_scatter else 'shared'
-
-        if approach == 'numpy':
-            return self._apply_via_numpy(fn)
-        elif approach == 'shared':
-            return self._apply_via_shared(fn)
-        elif approach == 'rma':
-            return self._apply_via_rma(fn)
-        else:
-            raise ValueError("approach must be one of 'auto', 'numpy', 'shared', or 'rma'")
-
-    def _apply_via_numpy(self, fn):
-        # Gather to root synchronously, apply function on root, and scatter result.
-        # All ranks call to_numpy(all_to_root=True), root gets full matrix, else None
-        full = self.to_numpy(all_to_root=False)  # root will have full matrix, others None
-        
-        print(f"{pmat.grid_comm.coords}: here in apply_via_numpy")
-        root = pmat.grid_comm.rank == 0
-  
-        if root:
-            out = fn(full)
-            
-            if out is None:
-                # assume in-place modification
-                out = full
-            # Validate
-            out = np.atleast_2d(out)
-            assert out.shape == (self.n, self.m), "fn returned array of wrong shape"
-        else:
-            
-
-            out = None
-
-        # from_numpy will broadcast shape/dtype and scatter blocks
-        return pmat.from_numpy(out, dtype=self.dtype)
-
-    def _apply_via_shared(self, fn):
-        # Allocate a shared window (one buffer accessible to all ranks).
-        # Each rank writes its local block to the shared array; root applies fn;
-        # then we create a new pmat via from_shared_buffer which copies out appropriate local blocks.
-        grid = pmat.grid_comm
-        dtype = self.dtype
-        coords = self.coords
-        n, m = self.shape
-        itemsize = np.dtype(dtype).itemsize
-
-        size = int(np.prod((n, m))) * itemsize
-
-        # Allocate shared memory across ranks in grid_comm
-        win = MPI.Win.Allocate_shared(size, disp_unit=itemsize, comm=grid)
-        # Buffer belongs to rank 0, but all processes can Shared_query(0)
-        buf, _ = win.Shared_query(0)
-        shared_array = np.ndarray(buffer=buf, dtype=dtype, shape=(n, m))
-
-        # Start epoch - synchronize before writes
-        win.Fence()
-
-        # Compute local write region
-        extent = self.extents[coords[0]][coords[1]]
-        pos = self.offsets[coords[0]][coords[1]]
-        row_start, row_end = pos[0], pos[0] + extent[0]
-        col_start, col_end = pos[1], pos[1] + extent[1]
-        local = self.local[:extent[0], :extent[1]]
-
-        if extent[0] > 0 and extent[1] > 0:
-            shared_array[row_start:row_end, col_start:col_end] = local
-
-        # Ensure all writes complete
-        win.Fence()
-
-        # Only root applies the lambda (avoid duplicating side effects)
-        if grid.rank == 0:
-            res = fn(shared_array)
-            if res is not None:
-                res = np.atleast_2d(res)
-                assert res.shape == (n, m), "fn returned array of wrong shape"
-                shared_array[:] = res
-
-        # Wait for function to complete on root and changes to be visible on other ranks
-        win.Fence()
-
-        # Use reusable factory to create a pmat reading from shared memory
-        new_pmat = pmat.from_shared_buffer(win, shared_array, dtype=dtype)
-
-        # Free the shared memory window
-        try:
-            win.Free()
-        except Exception:
-            # Some platforms use win.free()
-            try:
-                win.free()
-            except Exception:
-                pass
-
-        return new_pmat
-
-    def _apply_via_rma(self, fn):
-        # RMA approach: gather the whole matrix to a root buffer using Put,
+    def from_RMA(self, fn):
+        # gather the whole matrix to root using Put,
         # apply fn on root, then Get local blocks back from root.
         grid = pmat.grid_comm
         dtype = self.dtype
@@ -178,7 +65,7 @@ class pmat:
         itemsize = np.dtype(dtype).itemsize
         root = 0
 
-        # root will hold the full array as a 1D contiguous buffer; others have no backing memory
+        # root will hold the full array as a 1D buffer; others have None memory
         if grid.rank == root:
             root_buf = np.zeros((n * m,), dtype=dtype)
         else:
@@ -219,7 +106,7 @@ class pmat:
                 assert res.shape == (n, m), "fn returned array of wrong shape"
                 full[:] = res
 
-        # Barrier to ensure root modification done
+        # ensure root has finished 
         grid.Barrier()
 
         # Each rank now retrieves its local block from the root buffer using Get
@@ -554,7 +441,7 @@ class pmat:
     ############################################################################
 
     def __init__(self, n, m, local=None, dtype=np.float64):
-    # def __init__(self, shape: tuple[int, int], local=None):
+
 
         local = np.atleast_2d(local) if local is not None else None
 
@@ -645,10 +532,10 @@ class pmat:
         extent   = self.extents[coords[0]][coords[1]]
         has_work = int(extent[0] > 0 and extent[1] > 0)  # 1 if non-empty
 
-        row_all = grid.Sub([False, True])   # all ranks in my row
-        col_all = grid.Sub([True,  False])  # all ranks in my column
+        row_all = grid.Sub([False, True])  
+        col_all = grid.Sub([True,  False]) 
 
-        # Use MPI.UNDEFINED to drop ranks with no work
+ 
         row_color = 0 if has_work else MPI.UNDEFINED
         col_color = 0 if has_work else MPI.UNDEFINED
 
@@ -659,7 +546,7 @@ class pmat:
         col_all.Free()
 
     def __del__(self):
-     # Destructor: free communicators safely
+        # free communicators safely
         for comm in (getattr(self, 'row_comm', None), getattr(self, 'col_comm', None)):
             if comm is not None and comm != MPI.COMM_NULL:
                 try:
@@ -897,15 +784,12 @@ class pmat:
 
         return pmat(output_shape[0], output_shape[1], np.greater(A,  B))
 
-        # return pmat(self.n, self.m, self.local > other)
-
     def __eq__(self, other):
 
         A, B, output_shape = pmat.check_for_broadcast(self, other)
 
         return pmat(output_shape[0], output_shape[1], np.equal(A,  B), dtype=np.bool_)
 
-        # return pmat(self.n, self.m, self.local > other)
     
     def __add__(self, other): 
         A, B, output_shape = pmat.check_for_broadcast(self, other)
@@ -916,7 +800,6 @@ class pmat:
         A, B, output_shape = pmat.check_for_broadcast(self, other)
         
         return pmat(output_shape[0], output_shape[1], np.subtract(A, B))
-
 
     def __mul__(self, other):
         A, B, output_shape = pmat.check_for_broadcast(self, other)
@@ -948,19 +831,12 @@ class pmat:
         
         return pmat(output_shape[0], output_shape[1], np.add(B, A))
     
-
-    ##### failed in test.py..... ########
     def __rsub__(self, other):
         left_operand, right_operand, output_shape = pmat.check_for_broadcast(self, other)
         
         return pmat(output_shape[0], output_shape[1], np.subtract( right_operand, left_operand))
 
-        # # Handle scalar + pmat (right addition)
-        # if np.isscalar(other):
-        #     return pmat(self.n, self.m, other - self.local)
-        # else:
-        #     return NotImplemented
-
+    
     def __neg__(self):
         return pmat(self.n, self.m, -self.local)
 
@@ -980,7 +856,6 @@ class pmat:
 
     def __matmul__(self, other: 'pmat'):
         # Using Cannon's Algorithm
-
 
         assert self.m == other.n, f"A @ B: A.m:{self.m} != B.n:{other.n}"
 
@@ -1068,7 +943,7 @@ class pmat:
 
 
     ############################################################################
-    # Universal functions (np.exp, np.add, etc.)
+    # Overload universal functions (np.exp, np.add, etc.)
     ############################################################################
     def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
         extent = self.extents[self.coords[0]][self.coords[1]]
@@ -1099,7 +974,7 @@ class pmat:
 
 
     ############################################################################
-    # Handle non-ufunc NumPy functions (np.mean, np.concatenate, etc.)
+    # Overload non-ufunc NumPy functions (np.mean, np.concatenate, etc.)
     ############################################################################
 
     def __array_function__(self, func, types, args, kwargs):
@@ -1140,8 +1015,6 @@ class pmat:
     ############################################################################
     # Non-ufunc pmat functions (sum, mean, max, maximum, etc.)
     ############################################################################
-
-
 
     def psum(self, *args, **kwargs):
         axis = kwargs.get('axis', None) # axis=0 for cols, axis=1 for rows
@@ -1341,31 +1214,6 @@ class pmat:
         if axis == 0:
             raise NotImplementedError("pmean axis=0 not implemented yet")
         elif axis == 1:
-            # horz_group = self.grid_comm.Sub([False, True])  # rows
-
-            # dtype = self.dtype
-            # coords = self.coords
-            # extent = self.extent[coords[0]][coords[1]]
-            # local = self.local[:extent[0], :extent[1]]
-
-            # row_mean = []
-
-            # for row in range(extent[0]):
-            #     # Reduce to the root of each group
-            #     local_row_sum = np.sum(self.local[row, :])
-            #     row_mean.append(horz_group.reduce(local_row_sum, op=MPI.SUM, root=0))
-
-            # if self.grid_comm.coords[1] == 0:
-            #     # Remove Nones and make a column vector
-            #     row_mean = np.array([x for x in row_mean if x is not np.nan], dtype=dtype).flatten().reshape(-1, 1)
-                
-            #     # Divide by total number of columns
-            #     row_mean = row_mean / self.m
-            # else:
-            #     # Process is not a root
-            #     row_mean = None
-            # return pmat(self.n, 1, row_mean)
-
             return self.psum(axis=1) / self.m
 
         elif axis is None:
@@ -1487,51 +1335,3 @@ def p_ones_like(M_pmat: pmat) -> pmat:
     newmat.local[:extent[0], :extent[1]] = np.ones((extent[0], extent[1]))
 
     return newmat
-
-
-
-############################################################################
-# Matrix-matrix multiplication function
-############################################################################
-
-def matmul(A: pmat, B: pmat):
-    assert A.m == B.n, f"A @ B: A.m:{A.m} != B.n:{B.n}"
-
-
-
-    # Cannon's Algorithm
-    
-    C = np.zeros((A.n_loc, B.m_loc))
-
-    # Total steps over grid 
-    num_steps = min(pmat.grid_comm.dims)
-
-    # Deep copies for Sendrecv_replace
-    A_block = A.local.copy()
-    B_block = B.local.copy()
-
-    # Skew (initial alignment)
-    for _ in range(A.coords[0]):
-        src, dst = pmat.grid_comm.Shift(1, -1)
-        pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
-
-    for _ in range(A.coords[1]):
-        src, dst = pmat.grid_comm.Shift(0, -1)
-        pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
-
-    for _ in range(num_steps):
-        # Multiply and accumulate
-        C += A_block @ B_block
-
-        # Shift A left
-        src, dst = pmat.grid_comm.Shift(1, -1)
-        pmat.grid_comm.Sendrecv_replace(A_block, dest=dst, source=src)
-
-        # Shift B up
-        src, dst = pmat.grid_comm.Shift(0, -1)
-        pmat.grid_comm.Sendrecv_replace(B_block, dest=dst, source=src)
-
-    return pmat(A.n, B.m, local=C)
-
-
-

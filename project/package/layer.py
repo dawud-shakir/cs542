@@ -1,6 +1,10 @@
 """
 layer.py
+
+Activation functions, loss, and a Parallel_Layer class used by the
+distributed neural network implementation.
 """
+
 import numpy as np
 
 from package.pmat import pmat

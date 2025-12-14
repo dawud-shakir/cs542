@@ -1,5 +1,8 @@
-# utilities.py - utility functions
-
+"""
+ utilities.py
+ 
+ Utilities for distributed matrix operations using MPI.
+"""
 import numpy as np
 np.set_printoptions(precision=5, suppress=True, floatmode='fixed')
 

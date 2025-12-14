@@ -92,11 +92,11 @@ if __name__ == "__main__":
                 "setitem (n items)":    lambda: A_pmat.__setitem__(items, 0),
                 "remove_first_column":  lambda: A_pmat.remove_first_column(),
                 "greater_than(0.5)":    lambda: A_pmat.__gt__(0.5),
-                "global sum":           lambda: A_pmat.psum(),
+                "global sum":           lambda: A_pmat.sum(),
                 "global mean":          lambda: A_pmat.pmean(),
                 "global max":           lambda: A_pmat.pmax(),
 
-                "row sum":              lambda: A_pmat.psum(axis=1),
+                "row sum":              lambda: A_pmat.sum(axis=1),
                 "row mean":             lambda: A_pmat.pmean(axis=1),
                 "row max":              lambda: A_pmat.pmax(axis=1),
                 "argmax":               lambda: A_pmat.pargmax(axis=1),

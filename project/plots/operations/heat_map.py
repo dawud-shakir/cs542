@@ -30,8 +30,13 @@ hs = [64, 2048, 4096]
 
 # ---------------------------
 # OPERATION TIMES (seconds)
-# pulled from your logs
+# from logs
 # ---------------------------
+
+import numpy as np
+
+# rows: h = [64, 2048, 4096]
+# cols: p = [1, 4, 16, 64]
 
 # matmul
 matmul = np.array([
@@ -47,18 +52,70 @@ log_softmax = np.array([
     [0.70710, 0.19407, 0.09644, 0.04645],
 ])
 
+# transpose
+transpose = np.array([
+    [0.00005, 0.00009, 0.00014, 0.00024],
+    [0.04376, 0.01067, 0.00441, 0.00110],
+    [0.32949, 0.04535, 0.01568, 0.00539],
+])
+
+# remove_first_column
+remove_first_column = np.array([
+    [0.00015, 0.00025, 0.00045, 0.00116],
+    [0.06884, 0.05669, 0.06695, 0.05644],
+    [0.28431, 0.23073, 0.24947, 0.24977],
+])
+
 # stack_ones_on_top
-stack = np.array([
+stack_ones_on_top = np.array([
     [0.00012, 0.00024, 0.00045, 0.00115],
     [0.06713, 0.06317, 0.08134, 0.07376],
     [0.24997, 0.26647, 0.28236, 0.30333],
 ])
 
+# nll_loss_derivative
+nll_loss_derivative = np.array([
+    [0.00021, 0.00026, 0.00035, 0.00061],
+    [0.04240, 0.01458, 0.00708, 0.00269],
+    [0.15713, 0.05197, 0.02352, 0.00858],
+])
+
 ops = {
     "matmul": matmul,
     "log_softmax": log_softmax,
-    "stack_ones_on_top": stack,
+    "transpose": transpose,
+    "remove_first_column": remove_first_column,
+    "stack_ones_on_top": stack_ones_on_top,
+    "nll_loss_derivative": nll_loss_derivative,
 }
+
+
+# # matmul
+# matmul = np.array([
+#     [0.00008, 0.00014, 0.00020, 0.00040],
+#     [0.30611, 0.09429, 0.04404, 0.01714],
+#     [2.12576, 0.62162, 0.23180, 0.10950],
+# ])
+
+# # log_softmax
+# log_softmax = np.array([
+#     [0.00233, 0.00200, 0.00195, 0.00249],
+#     [0.16553, 0.06555, 0.03930, 0.02143],
+#     [0.70710, 0.19407, 0.09644, 0.04645],
+# ])
+
+# # stack_ones_on_top
+# stack = np.array([
+#     [0.00012, 0.00024, 0.00045, 0.00115],
+#     [0.06713, 0.06317, 0.08134, 0.07376],
+#     [0.24997, 0.26647, 0.28236, 0.30333],
+# ])
+
+# ops = {
+#     "matmul": matmul,
+#     "log_softmax": log_softmax,
+#     "stack_ones_on_top": stack,
+# }
 
 # ---------------------------
 # Heatmap generator

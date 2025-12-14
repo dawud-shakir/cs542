@@ -1,5 +1,9 @@
-# mnist.py
+"""
+mnist.py
 
+Utilities to load and preprocess the original MNIST dataset stored in IDX
+(file format used by the original dataset).
+"""
 import numpy as np
 import struct           # for unpacking binary files
 
@@ -48,10 +52,6 @@ def read_mnist_data():
 
     # Flatten to 2D: (10000, 28, 28) → (10000, 784)
     X_test = X_test.reshape(X_test.shape[0], -1)  
-
-    # Normalize pixel by grayscale max value (optional)
-    # X_train = (X_train.astype(np.float32) / 255.0)  
-    # X_test = (X_test.astype(np.float32) / 255.0)
 
     # Convert test labels to int64 for compatibility
     y_train = y_train.astype(np.int64) 

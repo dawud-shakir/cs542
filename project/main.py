@@ -1,5 +1,8 @@
 """
 main.py
+
+Builds a simple feed-forward neural network using Parallel_Layer and distributed matrices (pmat).
+
 """
 
 ################################################################################
@@ -117,8 +120,29 @@ p_X_train, p_y_train, p_X_test, p_y_test = load_data_files()
 ################################################################################
 # Hyperparameters and Network 
 ################################################################################
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+n_processes = comm.Get_size()
 
-pmat.use_scatter = True  # set to True to use scatter/gather instead of shared memory, which does not support multiple nodes
+# Find out the node number
+node_name = MPI.Get_processor_name()
+all_node_names = comm.gather(node_name, root=0)
+
+if rank == 0:
+    # Get unique node names and sort them to assign node numbers
+    unique_nodes = sorted(set(all_node_names))
+    node_mapping = {name: idx for idx, name in enumerate(unique_nodes)}
+else:
+    node_mapping = None
+
+node_mapping = comm.bcast(node_mapping, root=0)
+node_number = node_mapping[node_name]
+n_nodes = len(node_mapping)
+
+if n_nodes > 0:
+    pmat.use_scatter = True  # set to True to use scatter/gather instead of shared memory, which does not support multiple nodes
+else:
+    pmat.use_scatter = False  # use shared memory within nodes
 
 alpha = 1e-3
 n_epochs = 5
@@ -183,24 +207,6 @@ def evaluate():
 
 def main():
 
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    n_processes = comm.Get_size()
-    
-    # Find out the node number
-    node_name = MPI.Get_processor_name()
-    all_node_names = comm.gather(node_name, root=0)
-
-    if rank == 0:
-        # Get unique node names and sort them to assign node numbers
-        unique_nodes = sorted(set(all_node_names))
-        node_mapping = {name: idx for idx, name in enumerate(unique_nodes)}
-    else:
-        node_mapping = None
-
-    node_mapping = comm.bcast(node_mapping, root=0)
-    node_number = node_mapping[node_name]
-    n_nodes = len(node_mapping)
 
     pixel_value_min, pixel_value_max = p_X_train.pmin(), p_X_train.pmax()
     if MPI.COMM_WORLD.Get_rank() == 0:
